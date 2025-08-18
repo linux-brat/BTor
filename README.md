@@ -22,11 +22,3 @@ After that, just type:
 - Self-update + Uninstall
 - Clean, minimal, and built for speed
 
-## Notes 📝
-
-- Needs systemd, curl, bash, and sudo.
-- Default service: tor.service (can be changed later).
-
-Made for terminal lovers. Stay anonymous, stay sleek. 🕶️💜
-
-[1] https://raw.githubusercontent.com/linux-brat/BTor/main/btor.sh
