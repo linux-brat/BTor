@@ -1,126 +1,140 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# BTor - Simple Tor service manager
-# Requires: bash, systemd (systemctl), curl
-# Optional: jq (for nicer update checks; not required)
-# Service name can be overridden via BTOR_SERVICE_NAME env var
+# BTor single-file installer + manager
+# File: brat.sh
+# Purpose: Provide a single sh file that can be curl-installed and also acts as the runtime manager.
+# Requirements: bash, curl, systemd (systemctl), sudo for service actions.
+
+# -----------------------------
+# Config (can be overridden via env)
+# -----------------------------
 SERVICE_NAME="${BTOR_SERVICE_NAME:-tor.service}"
 BTOR_HOME="${BTOR_HOME:-$HOME/.btor}"
-BTOR_BIN_LINK="/usr/local/bin/btor"
-REPO_REMOTE="${BTOR_REPO:-https://raw.githubusercontent.com/youruser/btor/main}"
-VERSION_FILE_LOCAL="${BTOR_HOME}/VERSION"
-VERSION_FILE_REMOTE="${REPO_REMOTE}/VERSION"
-SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+BTOR_BIN_LINK="${BTOR_BIN_LINK:-/usr/local/bin/btor}"
+# Point this to the raw location of this same file in your GitHub repo:
+BTOR_RAW_URL_DEFAULT="https://raw.githubusercontent.com/linux-brat/BTor/main/brat.sh"
+BTOR_RAW_URL="${BTOR_REPO_RAW:-$BTOR_RAW_URL_DEFAULT}"
+BTOR_VERSION="${BTOR_VERSION:-0.1.0}"
 
-# Colors (fail gracefully if tput not available)
-if command -v tput >/dev/null 2>&1; then
-  BOLD="$(tput bold)"; RESET="$(tput sgr0)"; GREEN="$(tput setaf 2)"; RED="$(tput setaf 1)"; YELLOW="$(tput setaf 3)"; BLUE="$(tput setaf 4)"
-else
-  BOLD=""; RESET=""; GREEN=""; RED=""; YELLOW=""; BLUE=""
-fi
+# -----------------------------
+# Helpers
+# -----------------------------
+bold() { tput bold 2>/dev/null || true; }
+reset() { tput sgr0 2>/dev/null || true; }
+green() { tput setaf 2 2>/dev/null || true; }
+red() { tput setaf 1 2>/dev/null || true; }
+yellow() { tput setaf 3 2>/dev/null || true; }
+blue() { tput setaf 4 2>/dev/null || true; }
+
+info() { echo "$(blue)$(bold)[i]$(reset) $*"; }
+ok() { echo "$(green)$(bold)[ok]$(reset) $*"; }
+warn() { echo "$(yellow)$(bold)[warn]$(reset) $*"; }
+err() { echo "$(red)$(bold)[err]$(reset) $*"; }
 
 need_sudo() {
   if [[ $EUID -ne 0 ]]; then
-    echo "This action requires sudo."
     sudo -v
   fi
 }
 
-print_header() {
-  echo "${BOLD}BTor – Tor service manager${RESET}"
-  echo "Service: ${BOLD}${SERVICE_NAME}${RESET}"
-  echo
-  show_status concise || true
-  echo
+have_systemctl() {
+  command -v systemctl >/dev/null 2>&1
 }
 
-show_status() {
-  local mode="${1:-full}"
-  if ! command -v systemctl >/dev/null 2>&1; then
-    echo "${RED}systemctl not found. This tool requires systemd.${RESET}"
-    return 1
-  fi
-  if ! systemctl list-unit-files | grep -q "^tor\\.service\\b" && ! systemctl status "${SERVICE_NAME}" >/dev/null 2>&1; then
-    echo "${YELLOW}Warning: ${SERVICE_NAME} not found. Install Tor or adjust BTOR_SERVICE_NAME.${RESET}"
+# -----------------------------
+# Install / Uninstall / Update
+# -----------------------------
+install_self() {
+  info "Installing BTor to ${BTOR_HOME}..."
+  mkdir -p "${BTOR_HOME}"
+
+  # Detect if this script is coming from stdin (piped via curl) or a local file
+  if [ -p /dev/stdin ] && [ -t 0 ]; then
+    :
   fi
 
+  # If the script is being executed from a file, copy that file; else fetch from URL
+  if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE}" ]]; then
+    cp "${BASH_SOURCE}" "${BTOR_HOME}/btor"
+  else
+    curl -fsSL "${BTOR_RAW_URL}" -o "${BTOR_HOME}/btor"
+  fi
+
+  chmod +x "${BTOR_HOME}/btor"
+
+  info "Linking command to ${BTOR_BIN_LINK} (requires sudo)..."
+  need_sudo
+  sudo ln -sf "${BTOR_HOME}/btor" "${BTOR_BIN_LINK}"
+
+  ok "Installed. Use: btor"
+}
+
+uninstall_self() {
+  warn "Uninstalling BTor..."
+  need_sudo
+  sudo rm -f "${BTOR_BIN_LINK}" || true
+  rm -rf "${BTOR_HOME}" || true
+  ok "BTor uninstalled."
+}
+
+self_update() {
+  info "Updating from ${BTOR_RAW_URL}..."
+  mkdir -p "${BTOR_HOME}"
+  curl -fsSL "${BTOR_RAW_URL}" -o "${BTOR_HOME}/btor.new"
+  chmod +x "${BTOR_HOME}/btor.new"
+  mv "${BTOR_HOME}/btor.new" "${BTOR_HOME}/btor"
+  ok "BTor updated."
+}
+
+# -----------------------------
+# Tor service operations
+# -----------------------------
+start_service() { need_sudo; sudo systemctl start "${SERVICE_NAME}"; ok "Started ${SERVICE_NAME}."; }
+stop_service() { need_sudo; sudo systemctl stop "${SERVICE_NAME}"; ok "Stopped ${SERVICE_NAME}."; }
+restart_service(){ need_sudo; sudo systemctl restart "${SERVICE_NAME}"; ok "Restarted ${SERVICE_NAME}."; }
+enable_service() { need_sudo; sudo systemctl enable "${SERVICE_NAME}"; ok "Enabled ${SERVICE_NAME} at boot."; }
+disable_service(){ need_sudo; sudo systemctl disable "${SERVICE_NAME}"; ok "Disabled ${SERVICE_NAME} at boot."; }
+
+show_status() {
+  local mode="${1:-concise}"
+  if ! have_systemctl; then
+    err "systemctl not found; systemd is required."
+    return 1
+  fi
   local is_active is_enabled
   is_active="$(systemctl is-active "${SERVICE_NAME}" 2>/dev/null || true)"
   is_enabled="$(systemctl is-enabled "${SERVICE_NAME}" 2>/dev/null || true)"
 
-  local active_txt enabled_txt
-  if [[ "${is_active}" == "active" ]]; then active_txt="${GREEN}active${RESET}"; else active_txt="${RED}${is_active:-unknown}${RESET}"; fi
-  if [[ "${is_enabled}" == "enabled" ]]; then enabled_txt="${GREEN}enabled${RESET}"; else enabled_txt="${YELLOW}${is_enabled:-unknown}${RESET}"; fi
+  local a e
+  if [[ "${is_active}" == "active" ]]; then a="$(green)active$(reset)"; else a="$(red)${is_active:-unknown}$(reset)"; fi
+  if [[ "${is_enabled}" == "enabled" ]]; then e="$(green)enabled$(reset)"; else e="$(yellow)${is_enabled:-unknown}$(reset)"; fi
 
-  echo "Status: ${active_txt}  |  Boot: ${enabled_txt}"
+  echo "$(bold)BTor – Tor service manager$(reset)  v${BTOR_VERSION}"
+  echo "Service: $(bold)${SERVICE_NAME}$(reset)"
+  echo "Status: ${a}  |  Boot: ${e}"
 
-  if [[ "${mode}" != "concise" ]]; then
+  if [[ "${mode}" == "full" ]]; then
     echo
     systemctl --no-pager status "${SERVICE_NAME}" || true
   fi
 }
 
-start_service() { need_sudo; sudo systemctl start "${SERVICE_NAME}"; echo "${GREEN}Started ${SERVICE_NAME}.${RESET}"; }
-stop_service() { need_sudo; sudo systemctl stop "${SERVICE_NAME}"; echo "${GREEN}Stopped ${SERVICE_NAME}.${RESET}"; }
-restart_service(){ need_sudo; sudo systemctl restart "${SERVICE_NAME}"; echo "${GREEN}Restarted ${SERVICE_NAME}.${RESET}"; }
-enable_service() { need_sudo; sudo systemctl enable "${SERVICE_NAME}"; echo "${GREEN}Enabled ${SERVICE_NAME} at boot.${RESET}"; }
-disable_service(){ need_sudo; sudo systemctl disable "${SERVICE_NAME}"; echo "${GREEN}Disabled ${SERVICE_NAME} at boot.${RESET}"; }
-
-self_update() {
-  echo "Checking for updates..."
-  local local_v remote_v
-  if [[ -f "${VERSION_FILE_LOCAL}" ]]; then
-    local_v="$(cat "${VERSION_FILE_LOCAL}" | tr -d ' \t\r\n')"
-  else
-    local_v="0.0.0"
-  fi
-  remote_v="$(curl -fsSL "${VERSION_FILE_REMOTE}" | tr -d ' \t\r\n' || true)"
-
-  if [[ -z "${remote_v}" ]]; then
-    echo "${YELLOW}Unable to fetch remote version. Skipping update.${RESET}"
-    return 0
-  fi
-
-  if [[ "${remote_v}" == "${local_v}" ]]; then
-    echo "Already up to date (version ${local_v})."
-    return 0
-  fi
-
-  echo "Updating BTor from ${local_v} to ${remote_v}..."
-  mkdir -p "${BTOR_HOME}"
-  curl -fsSL "${REPO_REMOTE}/btor" -o "${BTOR_HOME}/btor.new"
-  chmod +x "${BTOR_HOME}/btor.new"
-  mv "${BTOR_HOME}/btor.new" "${BTOR_HOME}/btor"
-  curl -fsSL "${VERSION_FILE_REMOTE}" -o "${VERSION_FILE_LOCAL}"
-  if [[ -w "${SELF_PATH}" ]]; then
-    # Running directly from BTOR_HOME
-    :
-  else
-    # If running from symlink in /usr/local/bin, nothing else to do
-    :
-  fi
-  echo "${GREEN}BTor updated to version ${remote_v}.${RESET}"
-}
-
-uninstall_btor() {
-  echo "${YELLOW}Uninstalling BTor...${RESET}"
-  need_sudo
-  sudo rm -f "${BTOR_BIN_LINK}" || true
-  rm -rf "${BTOR_HOME}" || true
-  echo "${GREEN}BTor uninstalled.${RESET}"
-}
-
+# -----------------------------
+# Menu and CLI
+# -----------------------------
 menu() {
-  print_header
-  echo "${BOLD}Options:${RESET}"
+  clear || true
+  show_status concise
+  echo
+  echo "$(bold)Options:$(reset)"
   echo "1) Start tor.service"
   echo "2) Stop tor.service"
   echo "3) Enable at boot"
   echo "4) Disable at boot"
   echo "5) Restart tor.service"
   echo "6) Show full status"
-  echo "7) Self-update BTor"
+  echo "7) Update BTor"
   echo "8) Uninstall BTor"
   echo "9) Quit"
   echo
@@ -134,34 +148,41 @@ menu() {
     5) restart_service ;;
     6) show_status full ;;
     7) self_update ;;
-    8) uninstall_btor ;;
+    8) uninstall_self ;;
     9) exit 0 ;;
-    *) echo "${RED}Invalid option.${RESET}" ;;
+    *) err "Invalid option." ;;
   esac
 }
 
 usage() {
   cat <<EOF
-BTor – Tor service manager
+BTor – Single-file Tor service manager and installer
 
 Usage:
-  btor                  Launch interactive menu
-  btor status           Show concise status
-  btor status --full    Show full systemctl status
-  btor start|stop|restart|enable|disable
-  btor update           Self-update from GitHub
-  btor uninstall        Remove BTor files
+  bash brat.sh install          Install to ${BTOR_HOME} and link ${BTOR_BIN_LINK}
+  bash brat.sh uninstall        Remove installation
+  bash brat.sh update           Update from ${BTOR_RAW_URL}
+  bash brat.sh                  Launch interactive menu (if installed or running locally)
+
+  btor                          Launch interactive menu (after install)
+  btor start|stop|restart|enable|disable|status [--full]
+  btor update                   Update installed copy
+  btor uninstall                Uninstall BTor
 
 Env:
-  BTOR_SERVICE_NAME     Override service name (default: tor.service)
-  BTOR_HOME             Override BTor home (default: \$HOME/.btor)
-  BTOR_REPO             Override raw repo URL base
+  BTOR_SERVICE_NAME             Override service name (default: tor.service)
+  BTOR_HOME                     Install dir (default: \$HOME/.btor)
+  BTOR_BIN_LINK                 Symlink path (default: /usr/local/bin/btor)
+  BTOR_REPO_RAW                 URL to fetch brat.sh for update/install
 EOF
 }
 
-main() {
+cli() {
   local cmd="${1:-}"
   case "${cmd}" in
+    install) install_self ;;
+    uninstall) uninstall_self ;;
+    update) self_update ;;
     start) start_service ;;
     stop) stop_service ;;
     restart) restart_service ;;
@@ -170,12 +191,17 @@ main() {
     status)
       if [[ "${2:-}" == "--full" ]]; then show_status full; else show_status concise; fi
       ;;
-    update) self_update ;;
-    uninstall) uninstall_btor ;;
     -h|--help|help) usage ;;
-    "") menu ;;
-    *) echo "Unknown command: ${cmd}"; usage; exit 1 ;;
+    "")
+      # If running from /usr/local/bin/btor, act as manager; otherwise still present menu
+      menu
+      ;;
+    *)
+      err "Unknown command: ${cmd}"
+      usage
+      exit 1
+      ;;
   esac
 }
 
-main "$@"
+cli "${@}"
