@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # BTor single-file installer + manager
-# File: brat.sh
+# File: btor.sh
 # Purpose: Provide a single sh file that can be curl-installed and also acts as the runtime manager.
 # Requirements: bash, curl, systemd (systemctl), sudo for service actions.
 
@@ -13,9 +13,9 @@ SERVICE_NAME="${BTOR_SERVICE_NAME:-tor.service}"
 BTOR_HOME="${BTOR_HOME:-$HOME/.btor}"
 BTOR_BIN_LINK="${BTOR_BIN_LINK:-/usr/local/bin/btor}"
 # Point this to the raw location of this same file in your GitHub repo:
-BTOR_RAW_URL_DEFAULT="https://raw.githubusercontent.com/linux-brat/BTor/main/brat.sh"
+BTOR_RAW_URL_DEFAULT="https://raw.githubusercontent.com/linux-brat/BTor/main/btor.sh"
 BTOR_RAW_URL="${BTOR_REPO_RAW:-$BTOR_RAW_URL_DEFAULT}"
-BTOR_VERSION="${BTOR_VERSION:-0.1.0}"
+BTOR_VERSION="${BTOR_VERSION:-0.1.1}"
 
 # -----------------------------
 # Helpers
@@ -42,17 +42,31 @@ have_systemctl() {
   command -v systemctl >/dev/null 2>&1
 }
 
+is_tty() { [[ -t 0 ]]; }
+
+tty_read() {
+  # Usage: choice="$(tty_read "Prompt: ")"
+  if is_tty; then
+    read -rp "$1" choice
+  else
+    if exec 3</dev/tty 2>/dev/null; then
+      printf "%s" "$1" >&2
+      IFS= read -r choice <&3 || true
+      exec 3<&-
+    else
+      err "No TTY available for interactive menu."
+      exit 1
+    fi
+  fi
+  echo "${choice:-}"
+}
+
 # -----------------------------
 # Install / Uninstall / Update
 # -----------------------------
 install_self() {
   info "Installing BTor to ${BTOR_HOME}..."
   mkdir -p "${BTOR_HOME}"
-
-  # Detect if this script is coming from stdin (piped via curl) or a local file
-  if [ -p /dev/stdin ] && [ -t 0 ]; then
-    :
-  fi
 
   # If the script is being executed from a file, copy that file; else fetch from URL
   if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE}" ]]; then
@@ -138,9 +152,9 @@ menu() {
   echo "8) Uninstall BTor"
   echo "9) Quit"
   echo
-  read -rp "Select an option [1-9]: " choice
+  choice="$(tty_read "Select an option [1-9]: ")"
   echo
-  case "$choice" in
+  case "${choice}" in
     1) start_service ;;
     2) stop_service ;;
     3) enable_service ;;
@@ -159,25 +173,31 @@ usage() {
 BTor – Single-file Tor service manager and installer
 
 Usage:
-  bash brat.sh install          Install to ${BTOR_HOME} and link ${BTOR_BIN_LINK}
-  bash brat.sh uninstall        Remove installation
-  bash brat.sh update           Update from ${BTOR_RAW_URL}
-  bash brat.sh                  Launch interactive menu (if installed or running locally)
+  bash btor.sh install           Install to ${BTOR_HOME} and link ${BTOR_BIN_LINK}
+  bash btor.sh uninstall         Remove installation
+  bash btor.sh update            Update from ${BTOR_RAW_URL}
+  bash btor.sh                   Launch interactive menu (if installed or running locally)
 
-  btor                          Launch interactive menu (after install)
+  btor                           Launch interactive menu (after install)
   btor start|stop|restart|enable|disable|status [--full]
-  btor update                   Update installed copy
-  btor uninstall                Uninstall BTor
+  btor update                    Update installed copy
+  btor uninstall                 Uninstall BTor
 
 Env:
-  BTOR_SERVICE_NAME             Override service name (default: tor.service)
-  BTOR_HOME                     Install dir (default: \$HOME/.btor)
-  BTOR_BIN_LINK                 Symlink path (default: /usr/local/bin/btor)
-  BTOR_REPO_RAW                 URL to fetch brat.sh for update/install
+  BTOR_SERVICE_NAME              Override service name (default: tor.service)
+  BTOR_HOME                      Install dir (default: \$HOME/.btor)
+  BTOR_BIN_LINK                  Symlink path (default: /usr/local/bin/btor)
+  BTOR_REPO_RAW                  URL to fetch btor.sh for update/install
 EOF
 }
 
 cli() {
+  # If run via a pipe with no args, install then launch the installed command to ensure TTY
+  if [[ -z "${1:-}" ]] && ! is_tty; then
+    install_self
+    exec btor
+  fi
+
   local cmd="${1:-}"
   case "${cmd}" in
     install) install_self ;;
@@ -193,7 +213,6 @@ cli() {
       ;;
     -h|--help|help) usage ;;
     "")
-      # If running from /usr/local/bin/btor, act as manager; otherwise still present menu
       menu
       ;;
     *)
