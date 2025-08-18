@@ -3,22 +3,20 @@ set -euo pipefail
 
 # BTor single-file installer + manager
 # File: btor.sh
-# Purpose: Provide a single sh file that can be curl-installed and also acts as the runtime manager.
 # Requirements: bash, curl, systemd (systemctl), sudo for service actions.
 
 # -----------------------------
-# Config (can be overridden via env)
+# Config (overridable via env)
 # -----------------------------
 SERVICE_NAME="${BTOR_SERVICE_NAME:-tor.service}"
 BTOR_HOME="${BTOR_HOME:-$HOME/.btor}"
 BTOR_BIN_LINK="${BTOR_BIN_LINK:-/usr/local/bin/btor}"
-# Point this to the raw location of this same file in your GitHub repo:
 BTOR_RAW_URL_DEFAULT="https://raw.githubusercontent.com/linux-brat/BTor/main/btor.sh"
 BTOR_RAW_URL="${BTOR_REPO_RAW:-$BTOR_RAW_URL_DEFAULT}"
-BTOR_VERSION="${BTOR_VERSION:-0.1.1}"
+BTOR_VERSION="${BTOR_VERSION:-0.1.2}"
 
 # -----------------------------
-# Helpers
+# UI helpers
 # -----------------------------
 bold() { tput bold 2>/dev/null || true; }
 reset() { tput sgr0 2>/dev/null || true; }
@@ -32,33 +30,37 @@ ok() { echo "$(green)$(bold)[ok]$(reset) $*"; }
 warn() { echo "$(yellow)$(bold)[warn]$(reset) $*"; }
 err() { echo "$(red)$(bold)[err]$(reset) $*"; }
 
-need_sudo() {
-  if [[ $EUID -ne 0 ]]; then
-    sudo -v
-  fi
-}
+need_sudo() { if [[ $EUID -ne 0 ]]; then sudo -v; fi; }
+have_systemctl() { command -v systemctl >/dev/null 2>&1; }
+is_stdin_tty() { [[ -t 0 ]]; }
+have_dev_tty() { [[ -r /dev/tty ]]; }
 
-have_systemctl() {
-  command -v systemctl >/dev/null 2>&1
-}
-
-is_tty() { [[ -t 0 ]]; }
-
+# Read from interactive TTY even if stdin is a pipe
 tty_read() {
-  # Usage: choice="$(tty_read "Prompt: ")"
-  if is_tty; then
-    read -rp "$1" choice
-  else
-    if exec 3</dev/tty 2>/dev/null; then
-      printf "%s" "$1" >&2
-      IFS= read -r choice <&3 || true
-      exec 3<&-
-    else
-      err "No TTY available for interactive menu."
-      exit 1
-    fi
+  # Usage: var="$(tty_read 'Prompt: ')"
+  local prompt="$1"
+  if is_stdin_tty; then
+    read -rp "$prompt" __choice || true
+    echo "${__choice:-}"
+    return
   fi
-  echo "${choice:-}"
+  if have_dev_tty; then
+    # open /dev/tty on fd 3 for reading
+    printf "%s" "$prompt" >&2
+    local line=""
+    IFS= read -r line < /dev/tty || true
+    echo "${line:-}"
+    return
+  fi
+  # No usable TTY: fail with message so the user understands
+  err "No interactive TTY available. Try running: bash btor.sh or install first: curl -fsSL ${BTOR_RAW_URL} -o btor.sh && bash btor.sh install && btor"
+  exit 1
+}
+
+press_enter() {
+  if is_stdin_tty || have_dev_tty; then
+    tty_read "Press Enter to continue..."
+  fi
 }
 
 # -----------------------------
@@ -68,7 +70,7 @@ install_self() {
   info "Installing BTor to ${BTOR_HOME}..."
   mkdir -p "${BTOR_HOME}"
 
-  # If the script is being executed from a file, copy that file; else fetch from URL
+  # If executed from a file, copy it; if piped, fetch from URL
   if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE}" ]]; then
     cp "${BASH_SOURCE}" "${BTOR_HOME}/btor"
   else
@@ -77,11 +79,11 @@ install_self() {
 
   chmod +x "${BTOR_HOME}/btor"
 
-  info "Linking command to ${BTOR_BIN_LINK} (requires sudo)..."
+  info "Linking ${BTOR_BIN_LINK} (requires sudo)..."
   need_sudo
   sudo ln -sf "${BTOR_HOME}/btor" "${BTOR_BIN_LINK}"
 
-  ok "Installed. Use: btor"
+  ok "Installed. Launch with: btor"
 }
 
 uninstall_self() {
@@ -104,16 +106,16 @@ self_update() {
 # -----------------------------
 # Tor service operations
 # -----------------------------
-start_service() { need_sudo; sudo systemctl start "${SERVICE_NAME}"; ok "Started ${SERVICE_NAME}."; }
-stop_service() { need_sudo; sudo systemctl stop "${SERVICE_NAME}"; ok "Stopped ${SERVICE_NAME}."; }
-restart_service(){ need_sudo; sudo systemctl restart "${SERVICE_NAME}"; ok "Restarted ${SERVICE_NAME}."; }
-enable_service() { need_sudo; sudo systemctl enable "${SERVICE_NAME}"; ok "Enabled ${SERVICE_NAME} at boot."; }
-disable_service(){ need_sudo; sudo systemctl disable "${SERVICE_NAME}"; ok "Disabled ${SERVICE_NAME} at boot."; }
+start_service()   { need_sudo; sudo systemctl start   "${SERVICE_NAME}"; ok "Started ${SERVICE_NAME}."; }
+stop_service()    { need_sudo; sudo systemctl stop    "${SERVICE_NAME}"; ok "Stopped ${SERVICE_NAME}."; }
+restart_service() { need_sudo; sudo systemctl restart "${SERVICE_NAME}"; ok "Restarted ${SERVICE_NAME}."; }
+enable_service()  { need_sudo; sudo systemctl enable  "${SERVICE_NAME}"; ok "Enabled ${SERVICE_NAME} at boot."; }
+disable_service() { need_sudo; sudo systemctl disable "${SERVICE_NAME}"; ok "Disabled ${SERVICE_NAME} at boot."; }
 
 show_status() {
   local mode="${1:-concise}"
   if ! have_systemctl; then
-    err "systemctl not found; systemd is required."
+    err "systemctl not found; BTor requires systemd."
     return 1
   fi
   local is_active is_enabled
@@ -135,10 +137,10 @@ show_status() {
 }
 
 # -----------------------------
-# Menu and CLI
+# Menu
 # -----------------------------
-menu() {
-  clear || true
+menu_once() {
+  clear 2>/dev/null || true
   show_status concise
   echo
   echo "$(bold)Options:$(reset)"
@@ -152,8 +154,10 @@ menu() {
   echo "8) Uninstall BTor"
   echo "9) Quit"
   echo
+  local choice
   choice="$(tty_read "Select an option [1-9]: ")"
   echo
+
   case "${choice}" in
     1) start_service ;;
     2) stop_service ;;
@@ -162,12 +166,26 @@ menu() {
     5) restart_service ;;
     6) show_status full ;;
     7) self_update ;;
-    8) uninstall_self ;;
-    9) exit 0 ;;
+    8) uninstall_self; return 1 ;;
+    9) return 1 ;;
     *) err "Invalid option." ;;
   esac
+  return 0
 }
 
+menu_loop() {
+  while true; do
+    if ! menu_once; then
+      break
+    fi
+    echo
+    press_enter
+  done
+}
+
+# -----------------------------
+# Usage / CLI
+# -----------------------------
 usage() {
   cat <<EOF
 BTor – Single-file Tor service manager and installer
@@ -176,7 +194,7 @@ Usage:
   bash btor.sh install           Install to ${BTOR_HOME} and link ${BTOR_BIN_LINK}
   bash btor.sh uninstall         Remove installation
   bash btor.sh update            Update from ${BTOR_RAW_URL}
-  bash btor.sh                   Launch interactive menu (if installed or running locally)
+  bash btor.sh                   Launch interactive menu
 
   btor                           Launch interactive menu (after install)
   btor start|stop|restart|enable|disable|status [--full]
@@ -192,34 +210,36 @@ EOF
 }
 
 cli() {
-  # If run via a pipe with no args, install then launch the installed command to ensure TTY
-  if [[ -z "${1:-}" ]] && ! is_tty; then
-    install_self
-    exec btor
+  # If run via a pipe with no args:
+  # - Prefer installing, then exec 'btor' to inherit a real TTY session if available.
+  # - If /dev/tty isn't accessible, still run the menu using tty_read fallback.
+  if [[ -z "${1:-}" ]] && ! is_stdin_tty; then
+    if have_dev_tty; then
+      install_self
+      exec btor
+    else
+      warn "No /dev/tty detected; running menu without installing."
+      menu_loop
+      exit 0
+    fi
   fi
 
   local cmd="${1:-}"
   case "${cmd}" in
-    install) install_self ;;
+    install)   install_self ;;
     uninstall) uninstall_self ;;
-    update) self_update ;;
-    start) start_service ;;
-    stop) stop_service ;;
-    restart) restart_service ;;
-    enable) enable_service ;;
-    disable) disable_service ;;
+    update)    self_update ;;
+    start)     start_service ;;
+    stop)      stop_service ;;
+    restart)   restart_service ;;
+    enable)    enable_service ;;
+    disable)   disable_service ;;
     status)
       if [[ "${2:-}" == "--full" ]]; then show_status full; else show_status concise; fi
       ;;
     -h|--help|help) usage ;;
-    "")
-      menu
-      ;;
-    *)
-      err "Unknown command: ${cmd}"
-      usage
-      exit 1
-      ;;
+    "") menu_loop ;;
+    *)  err "Unknown command: ${cmd}"; usage; exit 1 ;;
   esac
 }
 
