@@ -2,7 +2,7 @@
 
 
 <p align="center">
-<img src="BTor.png" alt="BTor Logo" width="280"/>
+<img src="BTor.png" alt="BTor Logo" width="400"/>
 </p>
 
 
