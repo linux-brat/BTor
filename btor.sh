@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# BTor - Tor manager with classic UI, first-time setup, proxy helpers, Tor Browser detect/auto-install, and Tor route test
+# BTor - Tor manager with classic UI, first-time setup, proxy helpers,
+# Tor Browser detect/auto-install, Tor route test, and BridgeDB (bridges) management.
 
 # -----------------------------
 # Config
@@ -11,7 +12,7 @@ BTOR_HOME="${BTOR_HOME:-$HOME/.btor}"
 BTOR_BIN_LINK="${BTOR_BIN_LINK:-/usr/local/bin/btor}"
 BTOR_RAW_URL_DEFAULT="https://raw.githubusercontent.com/linux-brat/BTor/main/btor.sh"
 BTOR_RAW_URL="${BTOR_REPO_RAW:-$BTOR_RAW_URL_DEFAULT}"
-BTOR_VERSION="${BTOR_VERSION:-0.8.0}"
+BTOR_VERSION="${BTOR_VERSION:-0.9.0}"
 
 # Tor Browser locations
 TOR_BROWSER_DIR_DEFAULT="$HOME/.local/tor-browser"
@@ -25,6 +26,13 @@ BTOR_SOCKS_PORT_ALT="${BTOR_SOCKS_PORT_ALT:-9150}"  # Tor Browser default
 
 # First-run marker
 FIRST_RUN_MARKER="${BTOR_HOME}/.first_run_done"
+
+# Bridges config (system tor)
+TORRC_PATH_DEFAULT="/etc/tor/torrc"
+TORRC_PATH="${BTOR_TORRC_PATH:-$TORRC_PATH_DEFAULT}"
+TORRC_D_DIR="/etc/tor/torrc.d"
+BRIDGES_DROPIN="${TORRC_D_DIR}/bridges.conf"   # preferred if Include is supported
+USE_TORRC_DROPIN=1                              # 1=write to bridges.conf if possible else fallback to torrc
 
 # -----------------------------
 # UI Helpers (classic)
@@ -230,8 +238,8 @@ install_self() {
   printf "%s\n" "$(bold)Installing BTor$(reset)"
   line
   mkdir -p "${BTOR_HOME}" || true
-  if [ -n "${BASH_SOURCE[0]-}" ] && [ -f "${BASH_SOURCE}" ]; then
-    cp "${BASH_SOURCE}" "${BTOR_HOME}/btor" || true
+  if [ -n "${BASH_SOURCE[0]-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    cp "${BASH_SOURCE[0]}" "${BTOR_HOME}/btor" || true
   else
     curl -fsSL "${BTOR_RAW_URL}" -o "${BTOR_HOME}/btor" || true
   fi
@@ -248,7 +256,6 @@ install_self() {
     line
   fi
 }
-
 uninstall_self() {
   header
   printf "%s\n" "$(bold)Uninstalling BTor$(reset)"
@@ -477,6 +484,312 @@ proxy_status() {
 }
 
 # -----------------------------
+# Bridges (BridgeDB) Management
+# -----------------------------
+
+# Determine where to write bridges config:
+# Preferred: /etc/tor/torrc.d/bridges.conf if torrc includes "Include /etc/tor/torrc.d/*.conf"
+supports_torrc_dropin() {
+  [ -d "$TORRC_D_DIR" ] && grep -Eiq '^\s*Include\s+/etc/tor/torrc\.d/\*\.conf' "$TORRC_PATH" 2>/dev/null
+}
+
+bridges_target_path() {
+  if [ "$USE_TORRC_DROPIN" -eq 1 ] && supports_torrc_dropin; then
+    echo "$BRIDGES_DROPIN"
+  else
+    echo "$TORRC_PATH"
+  fi
+}
+
+torrc_backup() {
+  local target; target="$(bridges_target_path)"
+  need_sudo
+  local ts; ts="$(date +%s)"
+  sudo cp "$target" "${target}.bak.${ts}" 2>/dev/null || true
+  ok "Backup created: ${target}.bak.${ts}"
+}
+
+ensure_packages_for_obfs4() {
+  case "$(pm_detect)" in
+    apt) pm_install obfs4proxy     ;;
+    dnf) pm_install obfs4          ;;
+    yum) pm_install obfs4          ;;
+    pacman) pm_install go-obfs4proxy ;;
+    zypper) pm_install obfs4proxy  ;;
+    *) warn "Install obfs4proxy manually for your distro." ;;
+  esac
+}
+
+ensure_packages_for_snowflake() {
+  case "$(pm_detect)" in
+    apt|zypper) pm_install snowflake ;;
+    dnf|yum)    pm_install snowflake ;;
+    pacman)     pm_install snowflake ;;
+    *) warn "Install snowflake-client manually for your distro." ;;
+  esac
+}
+
+# Read bridges from user (multiline) until a single dot '.' line
+read_multiline_bridges() {
+  printf "Paste obfs4 Bridge lines (end with a single '.' on its own line):\n"
+  local lines=""
+  while true; do
+    local l; IFS= read -r l || true
+    [ "$l" = "." ] && break
+    lines="${lines}${l}\n"
+  done
+  printf "%b" "$lines"
+}
+
+# Validate a single obfs4 line (very basic check)
+is_valid_obfs4_line() {
+  # Must contain "Bridge obfs4" and cert= and iat-mode
+  echo "$1" | grep -Eq '^[[:space:]]*Bridge[[:space:]]+obfs4[[:space:]]+.*cert=.*iat-mode='
+}
+
+# Write or replace bridges config. Idempotent.
+write_bridges_config() {
+  local use_dropin=0
+  if [ "$USE_TORRC_DROPIN" -eq 1 ] && supports_torrc_dropin; then
+    use_dropin=1
+  fi
+  local target; target="$(bridges_target_path)"
+  need_sudo
+
+  if [ "$use_dropin" -eq 1 ]; then
+    sudo mkdir -p "$TORRC_D_DIR" || true
+    # Build new content
+    local tmp; tmp="$(mktemp)"
+    {
+      echo "# Managed by BTor - Bridges configuration"
+      echo "UseBridges 1"
+      [ -n "${1:-}" ] && printf "%b" "$1" | sed '/^[[:space:]]*$/d'
+      [ -n "${2:-}" ] && printf "%b" "$2" | sed '/^[[:space:]]*$/d'
+      [ -n "${3:-}" ] && printf "%b" "$3" | sed '/^[[:space:]]*$/d'
+    } > "$tmp"
+    sudo mv "$tmp" "$BRIDGES_DROPIN"
+    sudo chmod 644 "$BRIDGES_DROPIN" || true
+    ok "Wrote bridges configuration to ${BRIDGES_DROPIN}"
+  else
+    # Edit main torrc: remove existing UseBridges/Bridge/ClientTransportPlugin lines written by us, then append new.
+    torrc_backup
+    local tmp; tmp="$(mktemp)"
+    sudo awk '
+      BEGIN { skip=0 }
+      {
+        # Remove previous BTor-managed blocks? We cannot know reliably.
+        # We conservatively remove existing UseBridges/Bridge obfs4/snowflake and ClientTransportPlugin lines;
+        # admin custom lines may be lost: we warn beforehand in the menu.
+        if ($1=="UseBridges" || $1=="Bridge" || $1=="ClientTransportPlugin") {
+          # skip this line to avoid duplicates
+        } else {
+          print $0
+        }
+      }
+    ' "$TORRC_PATH" > "$tmp"
+    {
+      echo "UseBridges 1"
+      [ -n "${1:-}" ] && printf "%b" "$1" | sed '/^[[:space:]]*$/d'
+      [ -n "${2:-}" ] && printf "%b" "$2" | sed '/^[[:space:]]*$/d'
+      [ -n "${3:-}" ] && printf "%b" "$3" | sed '/^[[:space:]]*$/d'
+    } | sudo tee -a "$tmp" >/dev/null
+    sudo mv "$tmp" "$TORRC_PATH"
+    sudo chmod 644 "$TORRC_PATH" || true
+    ok "Updated ${TORRC_PATH} with bridges configuration"
+  fi
+}
+
+# Remove bridges (disable UseBridges and drop ClientTransportPlugin+Bridge lines we manage)
+remove_bridges_config() {
+  local target; target="$(bridges_target_path)"
+  need_sudo
+  torrc_backup
+  local tmp; tmp="$(mktemp)"
+  sudo awk '
+    {
+      # Drop UseBridges, Bridge (obfs4/snowflake), and ClientTransportPlugin lines
+      if ($1=="UseBridges") next
+      if ($1=="Bridge") next
+      if ($1=="ClientTransportPlugin") next
+      print $0
+    }
+  ' "$target" > "$tmp"
+  sudo mv "$tmp" "$target"
+  sudo chmod 644 "$target" || true
+  ok "Bridges removed from ${target}"
+}
+
+verify_and_restart_tor() {
+  if command -v tor >/dev/null 2>&1; then
+    if tor --verify-config >/dev/null 2>&1; then
+      ok "torrc verification OK"
+      restart_service
+    else
+      err "torrc verification FAILED. Restoring previous configuration may be required."
+      return 1
+    fi
+  else
+    warn "tor CLI not found; cannot verify config. Proceeding."
+    restart_service
+  fi
+}
+
+# Build ClientTransportPlugin lines
+ctp_obfs4_line() {
+  # Distro binary names vary; try common paths
+  local cand=""
+  for cand in /usr/bin/obfs4proxy /usr/lib/obfs4proxy/obfs4proxy /usr/local/bin/obfs4proxy; do
+    [ -x "$cand" ] && { echo "ClientTransportPlugin obfs4 exec ${cand}"; return; }
+  done
+  # Fallback; admin should ensure binary is present
+  echo "ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy"
+}
+ctp_snowflake_line() {
+  local cand=""
+  for cand in /usr/bin/snowflake-client /usr/local/bin/snowflake-client; do
+    [ -x "$cand" ] && { echo "ClientTransportPlugin snowflake exec ${cand}"; return; }
+  done
+  echo "ClientTransportPlugin snowflake exec /usr/bin/snowflake-client"
+}
+
+# Show current bridges
+show_bridges_config() {
+  header
+  printf "%s\n" "$(bold)Current Bridges configuration$(reset)"
+  line
+  local target; target="$(bridges_target_path)"
+  if [ -f "$target" ]; then
+    need_sudo
+    sudo awk '
+      /^UseBridges/ || /^Bridge/ || /^ClientTransportPlugin/ { print }
+    ' "$target" 2>/dev/null || true
+  else
+    printf "No bridges file found at %s\n" "$target"
+  fi
+  line
+  pause_once
+}
+
+# Add obfs4 bridges (user paste), include obfs4 ClientTransportPlugin
+bridges_add_obfs4() {
+  header
+  printf "%s\n" "$(bold)Add obfs4 bridges$(reset)"
+  line
+  ensure_packages_for_obfs4
+  printf "Adding obfs4 requires ClientTransportPlugin and Bridge lines.\n"
+  printf "Note: Existing UseBridges/Bridge/ClientTransportPlugin lines may be replaced in target config.\n\n"
+
+  local pasted; pasted="$(read_multiline_bridges)"
+  if [ -z "${pasted//[[:space:]]/}" ]; then
+    warn "No lines provided."
+    return 0
+  fi
+
+  # Filter valid obfs4 Bridge lines
+  local valid=""
+  while IFS= read -r ln; do
+    [ -z "${ln//[[:space:]]/}" ] && continue
+    if is_valid_obfs4_line "$ln"; then
+      valid="${valid}${ln}\n"
+    else
+      warn "Skipping invalid line: $ln"
+    fi
+  done <<EOF
+$(printf "%b" "$pasted")
+EOF
+
+  if [ -z "${valid//[[:space:]]/}" ]; then
+    err "No valid obfs4 Bridge lines detected."
+    return 1
+  fi
+
+  local ctp; ctp="$(ctp_obfs4_line)"
+  # Construct content chunks
+  local usebridges="UseBridges 1\n"
+  local bridges="$(printf "%b" "$valid")"
+  local ctpline="${ctp}\n"
+
+  write_bridges_config "$usebridges" "$ctpline" "$bridges"
+  verify_and_restart_tor
+  pause_once
+}
+
+# Enable Snowflake
+bridges_enable_snowflake() {
+  header
+  printf "%s\n" "$(bold)Enable Snowflake (pluggable transport)$(reset)"
+  line
+  ensure_packages_for_snowflake
+  local ctp; ctp="$(ctp_snowflake_line)"
+  # Standard Snowflake requires just "Bridge snowflake" with UseBridges 1
+  local content_use="UseBridges 1\n"
+  local content_ctp="${ctp}\n"
+  local content_br="Bridge snowflake\n"
+
+  write_bridges_config "$content_use" "$content_ctp" "$content_br"
+  verify_and_restart_tor
+  pause_once
+}
+
+# Disable all bridges (UseBridges off + remove Bridge/CTP)
+bridges_disable_all() {
+  header
+  printf "%s\n" "$(bold)Disable Bridges$(reset)"
+  line
+  remove_bridges_config
+  verify_and_restart_tor
+  pause_once
+}
+
+# Help screen (how to get bridges)
+bridges_help() {
+  header
+  printf "%s\n" "$(bold)Getting Bridges (BridgeDB)$(reset)"
+  line
+  cat <<'TXT'
+BridgeDB distributes bridges to help connect where Tor is blocked.
+
+Ways to get obfs4 bridges:
+- Via web (requires CAPTCHA): https://bridges.torproject.org/
+- Via email (Gmail or Riseup recommended):
+    Send an email to: bridges@torproject.org
+    Subject or body: get transport obfs4
+  You will receive obfs4 'Bridge' lines to paste here.
+
+Snowflake (no bridge lines needed):
+- Enable Snowflake to connect using volunteer proxies. Performance varies.
+TXT
+  line
+  pause_once
+}
+
+menu_bridges() {
+  while true; do
+    header
+    printf "%s\n" "$(bold)Bridges & Pluggable Transports$(reset)"
+    line
+    printf "Target torrc: %s\n" "$(bridges_target_path)"
+    printf "\n"
+    printf "1) Add obfs4 bridges (paste)\n"
+    printf "2) Enable Snowflake\n"
+    printf "3) Show current bridges\n"
+    printf "4) Disable / remove bridges\n"
+    printf "5) Help (how to get bridges)\n"
+    printf "6) Back\n\n"
+    local ch; ch="$(read_tty 'Select an option [1-6]: ')"
+    case "$ch" in
+      1) bridges_add_obfs4 ;;
+      2) bridges_enable_snowflake ;;
+      3) show_bridges_config ;;
+      4) bridges_disable_all ;;
+      5) bridges_help ;;
+      6) break ;;
+      *) err "Invalid option." ;;
+    esac
+  done
+}
+
+# -----------------------------
 # Tor Route Test
 # -----------------------------
 route_test() {
@@ -538,9 +851,10 @@ menu_once() {
   printf "5) Restart tor.service\n"
   printf "6) Show full status\n"
   printf "7) Browser Proxy (Set/Unset/Status)\n"
-  printf "8) Tor Route Test (check.torproject.org)\n"
-  printf "9) Quit\n\n"
-  local choice; choice="$(read_tty 'Select an option [1-9]: ')"
+  printf "8) Bridges & Pluggable Transports\n"
+  printf "9) Tor Route Test (check.torproject.org)\n"
+  printf "10) Quit\n\n"
+  local choice; choice="$(read_tty 'Select an option [1-10]: ')"
   printf "\n"
   case "${choice}" in
     1) start_service ;;
@@ -550,8 +864,9 @@ menu_once() {
     5) restart_service ;;
     6) clear 2>/dev/null || true; header; systemctl --no-pager status "${SERVICE_NAME}" || true; line ;;
     7) menu_browser_proxy ;;
-    8) route_test ;;
-    9) return 1 ;;
+    8) menu_bridges ;;
+    9) route_test ;;
+    10) return 1 ;;
     *) err "Invalid option." ;;
   esac
   return 0
