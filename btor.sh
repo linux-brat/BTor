@@ -3,8 +3,8 @@ set -euo pipefail
 
 # BTor - Tor manager with classic UI, first-time setup, proxy helpers,
 # Tor Browser detect/auto-install (robust multi-path scan + launcher fallback),
-# Tor route test, BridgeDB (bridges) management, Nyx support,
-# and BTor custom homepage injection for Tor Browser.
+# Tor route test, and BTor custom homepage injection for Tor Browser.
+# Nyx and Bridges menus removed per request. Nyx still installed on first run.
 
 # -----------------------------
 # Config
@@ -14,7 +14,7 @@ BTOR_HOME="${BTOR_HOME:-$HOME/.btor}"
 BTOR_BIN_LINK="${BTOR_BIN_LINK:-/usr/local/bin/btor}"
 BTOR_RAW_URL_DEFAULT="https://raw.githubusercontent.com/linux-brat/BTor/main/btor.sh"
 BTOR_RAW_URL="${BTOR_REPO_RAW:-$BTOR_RAW_URL_DEFAULT}"
-BTOR_VERSION="${BTOR_VERSION:-1.2.0}"
+BTOR_VERSION="${BTOR_VERSION:-1.3.0}"
 
 # Tor Browser locations
 TOR_BROWSER_DIR_DEFAULT="$HOME/.local/tor-browser"
@@ -28,13 +28,6 @@ BTOR_SOCKS_PORT_ALT="${BTOR_SOCKS_PORT_ALT:-9150}"  # Tor Browser default
 
 # First-run marker
 FIRST_RUN_MARKER="${BTOR_HOME}/.first_run_done"
-
-# Bridges config (system tor)
-TORRC_PATH_DEFAULT="/etc/tor/torrc"
-TORRC_PATH="${BTOR_TORRC_PATH:-$TORRC_PATH_DEFAULT}"
-TORRC_D_DIR="/etc/tor/torrc.d"
-BRIDGES_DROPIN="${TORRC_D_DIR}/bridges.conf"   # preferred if Include is supported
-USE_TORRC_DROPIN=1                              # 1=write to bridges.conf if possible else fallback to torrc
 
 # BTor custom homepage injection for Tor Browser
 BTOR_SRC_DIR_DEFAULT="$HOME/src"
@@ -131,9 +124,7 @@ tor_active() { systemctl is-active "${SERVICE_NAME}" 2>/dev/null | grep -q '^act
 # -----------------------------
 # Tor Browser detection: robust multi-path scan
 # -----------------------------
-# We scan common install/extract locations across the whole system to avoid re-downloading.
 tor_browser_scan_all() {
-  # Known candidate paths
   cat <<EOF
 ${BTOR_TOR_BROWSER_BIN}
 ${TOR_BROWSER_DIR}/tor-browser/Browser/start-tor-browser
@@ -147,26 +138,17 @@ $HOME/Applications/Tor Browser/start-tor-browser
 /var/opt/tor-browser/Browser/start-tor-browser
 /snap/bin/torbrowser-launcher
 EOF
-  # Desktop-wide search (bounded for speed):
-  # - user: ~/.local, ~/Downloads, ~/Desktop
-  # - system: /opt, /usr/local, /usr, /var, /mnt, /media
-  # Use -maxdepth to keep it fast; skip permission errors quietly.
   {
     find "$HOME" -maxdepth 4 -type f -name 'start-tor-browser' -perm -111 2>/dev/null || true
     find /opt /usr/local /usr /var -maxdepth 5 -type f -name 'start-tor-browser' -perm -111 2>/dev/null || true
-    # Mounted drives (best-effort)
     find /mnt /media -maxdepth 5 -type f -name 'start-tor-browser' -perm -111 2>/dev/null || true
   } | sort -u
 }
-
 tor_browser_bin() {
   local p
   while IFS= read -r p; do
     [ -z "${p:-}" ] && continue
-    # If it's the launcher snap, do not return as binary; let fallback run launcher separately.
-    if [ "$p" = "/snap/bin/torbrowser-launcher" ]; then
-      continue
-    fi
+    if [ "$p" = "/snap/bin/torbrowser-launcher" ]; then continue; fi
     if [ -x "$p" ]; then printf "%s" "$p"; return 0; fi
   done <<EOF
 $(tor_browser_scan_all)
@@ -177,22 +159,17 @@ EOF
 # -----------------------------
 # Tor Browser download (URL resolver + fallback)
 # -----------------------------
-# Resolve to a valid Tor Browser URL. Default pinned version can 404 over time,
-# so allow custom BTOR_TB_URL and try a small list of known mirrors/versions.
 resolve_tb_url() {
-  # 1) If user overrides, use it
   if [ -n "${BTOR_TB_URL:-}" ]; then
     echo "${BTOR_TB_URL}"
     return
   fi
-  # 2) Try a small ordered list (update as needed). Keep most recent first.
   cat <<'EOF'
 https://www.torproject.org/dist/torbrowser/13.5.4/tor-browser-linux64-13.5.4_ALL.tar.xz
 https://www.torproject.org/dist/torbrowser/13.5.3/tor-browser-linux64-13.5.3_ALL.tar.xz
 https://www.torproject.org/dist/torbrowser/13.5.2/tor-browser-linux64-13.5.2_ALL.tar.xz
 EOF
 }
-
 download_tor_browser() {
   header
   printf "%s\n" "$(bold)Install Tor Browser$(reset)"
@@ -236,11 +213,10 @@ EOF
   line
 }
 
-# Try torbrowser-launcher first (if installed), otherwise direct download
 tb_launcher_pkg_name() {
   case "$(pm_detect)" in
     apt|dnf|yum|zypper) echo "torbrowser-launcher" ;;
-    pacman) echo "torbrowser-launcher" ;; # usually AUR; pacman may not find it
+    pacman) echo "torbrowser-launcher" ;;
     *) echo "" ;;
   esac
 }
@@ -295,7 +271,6 @@ install_torbrowser_launcher_or_fallback() {
   line
   return 0
 }
-
 ensure_tor_browser() {
   local bin=""
   if bin="$(tor_browser_bin)"; then printf "%s" "$bin"; return 0; fi
@@ -318,15 +293,12 @@ tor_browser_set_custom_homepage() {
     return 0
   fi
 
-  # Locate Browser dir by using detected start-tor-browser path
   local stb=""
   stb="$(tor_browser_bin 2>/dev/null || true)"
   local tb_base=""
   if [ -n "$stb" ]; then
-    # .../tor-browser/Browser/start-tor-browser -> take dirname twice
     tb_base="$(dirname "$(dirname "$stb")")"
   fi
-  # Fallbacks
   if [ -z "$tb_base" ] || [ ! -d "$tb_base" ]; then
     if [ -d "${TOR_BROWSER_DIR}/tor-browser/Browser" ]; then
       tb_base="${TOR_BROWSER_DIR}/tor-browser/Browser"
@@ -337,15 +309,12 @@ tor_browser_set_custom_homepage() {
     return 0
   fi
 
-  # Copy custom HTML
   local dest_html="${tb_base}/btor_home.html"
   cp -f "$BTOR_HOME_HTML" "$dest_html" || { warn "Failed to copy homepage HTML."; return 0; }
 
-  # Default prefs file for Tor Browser (applies to new profile or resets)
   local defaults_pref_dir="${tb_base}/defaults/preferences"
-  local pref_target=""
   mkdir -p "$defaults_pref_dir" 2>/dev/null || true
-  pref_target="${defaults_pref_dir}/btor-homepage.js"
+  local pref_target="${defaults_pref_dir}/btor-homepage.js"
 
   {
     echo '// Set by BTor - custom homepage'
@@ -358,7 +327,9 @@ tor_browser_set_custom_homepage() {
 }
 
 # -----------------------------
-# First-time setup
+# First-time setup (adjusted per request)
+# - Arch: explicitly pacman install tor, torbrowser-launcher, nyx
+# - Other distros: best-effort generic install
 # -----------------------------
 first_run_needed() { [ ! -f "${FIRST_RUN_MARKER}" ]; }
 
@@ -380,18 +351,26 @@ first_run_setup() {
   printf "%s\n" "$(bold)First-time setup$(reset)"
   line
 
-  # 1) Tor
-  if tor_cli_installed && tor_service_exists; then
-    ok "Tor is already installed."
-  else
-    info "Installing Tor..."
-    case "$(pm_detect)" in
-      apt|dnf|yum|pacman|zypper) pm_install tor ;;
-      *) warn "Unsupported package manager. Please install Tor manually." ;;
-    esac
-  fi
+  case "$(pm_detect)" in
+    pacman)
+      info "Arch/Manjaro detected: installing required packages via pacman"
+      need_sudo
+      sudo pacman -Sy --noconfirm tor torbrowser-launcher nyx || warn "pacman install reported issues; continuing."
+      ;;
+    apt|dnf|yum|zypper)
+      info "Installing Tor"
+      pm_install tor || warn "Tor install reported issues."
+      info "Installing torbrowser-launcher (if available); will fallback if not."
+      pm_install torbrowser-launcher || warn "torbrowser-launcher not available or failed; fallback will be used if needed."
+      info "Installing Nyx"
+      pm_install nyx || warn "Nyx install reported issues."
+      ;;
+    *)
+      warn "Unknown distro: please ensure tor, torbrowser-launcher, and nyx are installed."
+      ;;
+  esac
 
-  # 2) Tor Browser (scan first, then launcher, then direct)
+  # Tor Browser (scan -> launcher -> direct)
   local tb_bin=""
   if tb_bin="$(tor_browser_bin)"; then
     ok "Tor Browser found."
@@ -403,27 +382,16 @@ first_run_setup() {
       warn "Tor Browser not detected after install attempts."
     fi
   fi
-
-  # Inject homepage if available
   if tb_bin="$(tor_browser_bin)"; then
     tor_browser_set_custom_homepage
   fi
 
-  # 3) Node.js + npm (npx)
+  # Node.js + npm (npx)
   if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
     ok "Node.js and npm are installed."
   else
     info "Installing Node.js and npm (for npx)..."
     install_node_npm
-  fi
-
-  # 4) Nyx
-  if command -v nyx >/dev/null 2>&1; then
-    ok "Nyx is installed."
-  else
-    info "Installing Nyx (tor monitor)..."
-    install_nyx
-    if command -v nyx >/dev/null 2>&1; then ok "Nyx installed."; else warn "Nyx install may have failed."; fi
   fi
 
   mkdir -p "${BTOR_HOME}" || true
@@ -490,7 +458,6 @@ start_service() {
     ok "Started ${SERVICE_NAME}."
     if confirm "Open Tor Browser now? [y/N]: "; then
       local bin=""; if bin="$(ensure_tor_browser)"; then
-        # Ensure homepage injected (in case TB was installed right now)
         tor_browser_set_custom_homepage
         nohup "$bin" >/dev/null 2>&1 & ok "Tor Browser launched."
       else
@@ -598,10 +565,10 @@ firefox_unset_proxy_all() {
 browser_wrapper_dir="${BTOR_HOME}/proxy-wrappers"
 chromium_candidates() {
   cat <<EOF
+google-chrome-stable
+google-chrome
 chromium
 chromium-browser
-google-chrome
-google-chrome-stable
 brave
 brave-browser
 microsoft-edge
@@ -609,7 +576,18 @@ microsoft-edge-stable
 vivaldi
 EOF
 }
-make_wrapper() {
+first_available_browser() {
+  while IFS= read -r c; do
+    [ -z "${c:-}" ] && continue
+    if command -v "$c" >/dev/null 2>&1; then echo "$c"; return 0; fi
+  done <<EOF
+$(chromium_candidates)
+EOF
+  # fallback to firefox if present (we avoid modifying its runtime prefs here)
+  if command -v firefox >/dev/null 2>&1; then echo "firefox"; return 0; fi
+  return 1
+}
+make_wrapper_for() {
   local app="${1:-}"; [ -n "$app" ] || return 1
   local bin=""; bin="$(command -v "$app" 2>/dev/null || true)"; [ -z "$bin" ] && return 1
   mkdir -p "$browser_wrapper_dir" || true
@@ -619,9 +597,38 @@ make_wrapper() {
 exec "$bin" --proxy-server="socks5://${BTOR_SOCKS_HOST}:${BTOR_SOCKS_PORT}" --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE localhost" "\$@"
 EOF
   chmod +x "$wrapper" || true
-  ok "Wrapper: $wrapper"
+  echo "$wrapper"
 }
-remove_wrappers() { rm -rf "$browser_wrapper_dir" 2>/dev/null || true; }
+
+make_wrappers_all() {
+  local any=0 c
+  while IFS= read -r c; do
+    [ -z "${c:-}" ] && continue
+    if command -v "$c" >/dev/null 2>&1; then
+      make_wrapper_for "$c" >/dev/null && any=1 || true
+    fi
+  done <<EOF
+$(chromium_candidates)
+EOF
+  return $any
+}
+
+# Open check.torproject.org in a proxied browser (wrapper)
+open_check_tor_in_proxied_browser() {
+  local app=""; app="$(first_available_browser || true)"
+  if [ -z "${app:-}" ]; then
+    warn "No supported browser found to open check.torproject.org"
+    return 1
+  fi
+  local wrapper; wrapper="$(make_wrapper_for "$app" || true)"
+  if [ -z "${wrapper:-}" ]; then
+    warn "Failed to create proxy wrapper for ${app}"
+    return 1
+  fi
+  nohup "$wrapper" "http://check.torproject.org/" >/dev/null 2>&1 &
+  ok "Opened check.torproject.org via ${app} with SOCKS ${BTOR_SOCKS_HOST}:${BTOR_SOCKS_PORT}"
+  return 0
+}
 
 proxy_set_all() {
   header
@@ -629,18 +636,8 @@ proxy_set_all() {
   line
   gnome_proxy_set || true
   firefox_set_proxy_all
-  local any=0 c
-  while IFS= read -r c; do
-    [ -z "${c:-}" ] && continue
-    if command -v "$c" >/dev/null 2>&1; then make_wrapper "$c" && any=1 || true; fi
-  done <<EOF
-$(chromium_candidates)
-EOF
-  if [ "$any" -eq 1 ]; then
-    info "Use wrappers from: ${browser_wrapper_dir}"
-  else
-    warn "No Chromium-family browsers detected for wrappers."
-  fi
+  make_wrappers_all || true
+  ok "Proxy applied successfully."
   line
 }
 proxy_unset_all() {
@@ -650,319 +647,15 @@ proxy_unset_all() {
   gnome_proxy_unset || true
   firefox_unset_proxy_all
   remove_wrappers
-  ok "Proxy settings removed."
+  ok "Proxy removed successfully."
   line
 }
 proxy_status() {
   header
-  printf "%s\n" "$(bold)Proxy Status$(reset)"
+  printf "%s\n" "$(bold)Proxy Status & Test$(reset)"
   line
-  printf "Target: %s:%s\n\n" "${BTOR_SOCKS_HOST}" "${BTOR_SOCKS_PORT}"
-  if command -v gsettings >/dev/null 2>&1; then
-    local mode host port
-    mode="$(gsettings get org.gnome.system.proxy mode 2>/dev/null || echo unknown)"
-    host="$(gsettings get org.gnome.system.proxy.socks host 2>/dev/null || echo '')"
-    port="$(gsettings get org.gnome.system.proxy.socks port 2>/dev/null || echo '')"
-    printf "GNOME: mode=%s socks=%s:%s\n" "${mode}" "${host//\'}" "${port}"
-  else
-    printf "GNOME: gsettings not available\n"
-  fi
-  printf "\n"
-  local any=0 d
-  while IFS= read -r d; do
-    [ -z "${d:-}" ] && continue
-    any=1
-    printf "Firefox profile: %s\n" "$d"
-    if [ -f "$d/user.js" ]; then
-      grep -E 'network\.proxy\.(type|socks|socks_port|socks_remote_dns)' "$d/user.js" 2>/dev/null | sed 's/^/  /' || true
-    else
-      printf "  user.js not present\n"
-    fi
-    printf "\n"
-  done < <(firefox_profiles_dirs || true)
-  [ "$any" -eq 0 ] && printf "Firefox: no profiles detected\n"
-  printf "\nWrappers dir: %s\n" "$browser_wrapper_dir"
-  ls -1 "$browser_wrapper_dir" 2>/dev/null | sed 's/^/  /' || printf "  (no wrappers)\n"
-  line
-}
-
-# -----------------------------
-# Bridges (BridgeDB) Management
-# -----------------------------
-supports_torrc_dropin() {
-  [ -d "$TORRC_D_DIR" ] && grep -Eiq '^\s*Include\s+/etc/tor/torrc\.d/\*\.conf' "$TORRC_PATH" 2>/dev/null
-}
-bridges_target_path() {
-  if [ "$USE_TORRC_DROPIN" -eq 1 ] && supports_torrc_dropin; then
-    echo "$BRIDGES_DROPIN"
-  else
-    echo "$TORRC_PATH"
-  fi
-}
-torrc_backup() {
-  local target; target="$(bridges_target_path)"
-  need_sudo
-  local ts; ts="$(date +%s)"
-  sudo cp "$target" "${target}.bak.${ts}" 2>/dev/null || true
-  ok "Backup created: ${target}.bak.${ts}"
-}
-ensure_packages_for_obfs4() {
-  case "$(pm_detect)" in
-    apt) pm_install obfs4proxy     ;;
-    dnf) pm_install obfs4          ;;
-    yum) pm_install obfs4          ;;
-    pacman) pm_install go-obfs4proxy ;;
-    zypper) pm_install obfs4proxy  ;;
-    *) warn "Install obfs4proxy manually for your distro." ;;
-  esac
-}
-ensure_packages_for_snowflake() {
-  case "$(pm_detect)" in
-    apt|zypper|dnf|yum|pacman) pm_install snowflake ;;
-    *) warn "Install snowflake-client manually for your distro." ;;
-  esac
-}
-read_multiline_bridges() {
-  printf "Paste obfs4 Bridge lines (end with a single '.' on its own line):\n"
-  local lines=""
-  while true; do
-    local l; IFS= read -r l || true
-    [ "$l" = "." ] && break
-    lines="${lines}${l}\n"
-  done
-  printf "%b" "$lines"
-}
-is_valid_obfs4_line() {
-  echo "$1" | grep -Eq '^[[:space:]]*Bridge[[:space:]]+obfs4[[:space:]]+.*cert=.*iat-mode='
-}
-write_bridges_config() {
-  local use_dropin=0
-  if [ "$USE_TORRC_DROPIN" -eq 1 ] && supports_torrc_dropin; then
-    use_dropin=1
-  fi
-  local target; target="$(bridges_target_path)"
-  need_sudo
-
-  if [ "$use_dropin" -eq 1 ]; then
-    sudo mkdir -p "$TORRC_D_DIR" || true
-    local tmp; tmp="$(mktemp)"
-    {
-      echo "# Managed by BTor - Bridges configuration"
-      echo "UseBridges 1"
-      [ -n "${1:-}" ] && printf "%b" "$1" | sed '/^[[:space:]]*$/d'
-      [ -n "${2:-}" ] && printf "%b" "$2" | sed '/^[[:space:]]*$/d'
-      [ -n "${3:-}" ] && printf "%b" "$3" | sed '/^[[:space:]]*$/d'
-    } > "$tmp"
-    sudo mv "$tmp" "$BRIDGES_DROPIN"
-    sudo chmod 644 "$BRIDGES_DROPIN" || true
-    ok "Wrote bridges configuration to ${BRIDGES_DROPIN}"
-  else
-    torrc_backup
-    local tmp; tmp="$(mktemp)"
-    sudo awk '
-      {
-        if ($1=="UseBridges") next
-        if ($1=="Bridge") next
-        if ($1=="ClientTransportPlugin") next
-        print $0
-      }
-    ' "$TORRC_PATH" > "$tmp"
-    {
-      echo "UseBridges 1"
-      [ -n "${1:-}" ] && printf "%b" "$1" | sed '/^[[:space:]]*$/d'
-      [ -n "${2:-}" ] && printf "%b" "$2" | sed '/^[[:space:]]*$/d'
-      [ -n "${3:-}" ] && printf "%b" "$3" | sed '/^[[:space:]]*$/d'
-    } | sudo tee -a "$tmp" >/dev/null
-    sudo mv "$tmp" "$TORRC_PATH"
-    sudo chmod 644 "$TORRC_PATH" || true
-    ok "Updated ${TORRC_PATH} with bridges configuration"
-  fi
-}
-remove_bridges_config() {
-  local target; target="$(bridges_target_path)"
-  need_sudo
-  torrc_backup
-  local tmp; tmp="$(mktemp)"
-  sudo awk '
-    {
-      if ($1=="UseBridges") next
-      if ($1=="Bridge") next
-      if ($1=="ClientTransportPlugin") next
-      print $0
-    }
-  ' "$target" > "$tmp"
-  sudo mv "$tmp" "$target"
-  sudo chmod 644 "$target" || true
-  ok "Bridges removed from ${target}"
-}
-verify_and_restart_tor() {
-  if command -v tor >/dev/null 2>&1; then
-    if tor --verify-config >/dev/null 2>&1; then
-      ok "torrc verification OK"
-      restart_service
-    else
-      err "torrc verification FAILED. Restoring previous configuration may be required."
-      return 1
-    fi
-  else
-    warn "tor CLI not found; cannot verify config. Proceeding."
-    restart_service
-  fi
-}
-ctp_obfs4_line() {
-  local cand=""
-  for cand in /usr/bin/obfs4proxy /usr/lib/obfs4proxy/obfs4proxy /usr/local/bin/obfs4proxy; do
-    [ -x "$cand" ] && { echo "ClientTransportPlugin obfs4 exec ${cand}"; return; }
-  done
-  echo "ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy"
-}
-ctp_snowflake_line() {
-  local cand=""
-  for cand in /usr/bin/snowflake-client /usr/local/bin/snowflake-client; do
-    [ -x "$cand" ] && { echo "ClientTransportPlugin snowflake exec ${cand}"; return; }
-  done
-  echo "ClientTransportPlugin snowflake exec /usr/bin/snowflake-client"
-}
-show_bridges_config() {
-  header
-  printf "%s\n" "$(bold)Current Bridges configuration$(reset)"
-  line
-  local target; target="$(bridges_target_path)"
-  if [ -f "$target" ]; then
-    need_sudo
-    sudo awk '/^UseBridges/ || /^Bridge/ || /^ClientTransportPlugin/ { print }' "$target" 2>/dev/null || true
-  else
-    printf "No bridges file found at %s\n" "$target"
-  fi
-  line
-  pause_once
-}
-bridges_add_obfs4() {
-  header
-  printf "%s\n" "$(bold)Add obfs4 bridges$(reset)"
-  line
-  ensure_packages_for_obfs4
-  printf "Adding obfs4 requires ClientTransportPlugin and Bridge lines.\n"
-  printf "Note: Existing UseBridges/Bridge/ClientTransportPlugin lines may be replaced in target config.\n\n"
-
-  local pasted; pasted="$(read_multiline_bridges)"
-  if [ -z "${pasted//[[:space:]]/}" ]; then
-    warn "No lines provided."
-    return 0
-  fi
-
-  local valid=""
-  while IFS= read -r ln; do
-    [ -z "${ln//[[:space:]]/}" ] && continue
-    if is_valid_obfs4_line "$ln"; then
-      valid="${valid}${ln}\n"
-    else
-      warn "Skipping invalid line: $ln"
-    fi
-  done <<EOF
-$(printf "%b" "$pasted")
-EOF
-
-  if [ -z "${valid//[[:space:]]/}" ]; then
-    err "No valid obfs4 Bridge lines detected."
-    return 1
-  fi
-
-  local ctp; ctp="$(ctp_obfs4_line)"
-  local usebridges="UseBridges 1\n"
-  local bridges="$(printf "%b" "$valid")"
-  local ctpline="${ctp}\n"
-
-  write_bridges_config "$usebridges" "$ctpline" "$bridges"
-  verify_and_restart_tor
-  pause_once
-}
-bridges_enable_snowflake() {
-  header
-  printf "%s\n" "$(bold)Enable Snowflake (pluggable transport)$(reset)"
-  line
-  ensure_packages_for_snowflake
-  local ctp; ctp="$(ctp_snowflake_line)"
-  local content_use="UseBridges 1\n"
-  local content_ctp="${ctp}\n"
-  local content_br="Bridge snowflake\n"
-
-  write_bridges_config "$content_use" "$content_ctp" "$content_br"
-  verify_and_restart_tor
-  pause_once
-}
-bridges_disable_all() {
-  header
-  printf "%s\n" "$(bold)Disable Bridges$(reset)"
-  line
-  remove_bridges_config
-  verify_and_restart_tor
-  pause_once
-}
-bridges_help() {
-  header
-  printf "%s\n" "$(bold)Getting Bridges (BridgeDB)$(reset)"
-  line
-  cat <<'TXT'
-BridgeDB distributes bridges to help connect where Tor is blocked.
-
-Ways to get obfs4 bridges:
-- Via web (requires CAPTCHA): https://bridges.torproject.org/
-- Via email (Gmail or Riseup recommended):
-    Send an email to: bridges@torproject.org
-    Subject or body: get transport obfs4
-  You will receive obfs4 'Bridge' lines to paste here.
-
-Snowflake (no bridge lines needed):
-- Enable Snowflake to connect using volunteer proxies. Performance varies.
-TXT
-  line
-  pause_once
-}
-menu_bridges() {
-  while true; do
-    header
-    printf "%s\n" "$(bold)Bridges & Pluggable Transports$(reset)"
-    line
-    printf "Target torrc: %s\n" "$(bridges_target_path)"
-    printf "\n"
-    printf "1) Add obfs4 bridges (paste)\n"
-    printf "2) Enable Snowflake\n"
-    printf "3) Show current bridges\n"
-    printf "4) Disable / remove bridges\n"
-    printf "5) Help (how to get bridges)\n"
-    printf "6) Back\n\n"
-    local ch; ch="$(read_tty 'Select an option [1-6]: ')"
-    case "$ch" in
-      1) bridges_add_obfs4 ;;
-      2) bridges_enable_snowflake ;;
-      3) show_bridges_config ;;
-      4) bridges_disable_all ;;
-      5) bridges_help ;;
-      6) break ;;
-      *) err "Invalid option." ;;
-    esac
-  done
-}
-
-# -----------------------------
-# Nyx (Tor monitor)
-# -----------------------------
-launch_nyx() {
-  header
-  printf "%s\n" "$(bold)Nyx (tor monitor)$(reset)"
-  line
-  if ! command -v nyx >/dev/null 2>&1; then
-    warn "Nyx is not installed. Attempting install..."
-    install_nyx
-  fi
-  if command -v nyx >/dev/null 2>&1; then
-    printf "Launching Nyx... (press q to quit Nyx)\n"
-    sleep 1
-    nyx || true
-  else
-    err "Nyx not available on this system."
-  fi
+  printf "Target SOCKS: %s:%s\n\n" "${BTOR_SOCKS_HOST}" "${BTOR_SOCKS_PORT}"
+  open_check_tor_in_proxied_browser || warn "Could not auto-open a proxied browser."
   line
   pause_once
 }
@@ -1004,7 +697,7 @@ menu_browser_proxy() {
     printf "SOCKS %s:%s\n\n" "${BTOR_SOCKS_HOST}" "${BTOR_SOCKS_PORT}"
     printf "1) Set proxy (GNOME + Firefox + wrappers)\n"
     printf "2) Remove proxy\n"
-    printf "3) Status\n"
+    printf "3) Status & open check.torproject.org\n"
     printf "4) Back\n\n"
     local choice; choice="$(read_tty 'Select an option [1-4]: ')"
     case "$choice" in
@@ -1029,11 +722,9 @@ menu_once() {
   printf "5) Restart tor.service\n"
   printf "6) Show full status\n"
   printf "7) Browser Proxy (Set/Unset/Status)\n"
-  printf "8) Bridges & Pluggable Transports\n"
-  printf "9) Tor Route Test (check.torproject.org)\n"
-  printf "10) Launch Nyx (tor monitor)\n"
-  printf "11) Quit\n\n"
-  local choice; choice="$(read_tty 'Select an option [1-11]: ')"
+  printf "8) Tor Route Test (check.torproject.org)\n"
+  printf "9) Quit\n\n"
+  local choice; choice="$(read_tty 'Select an option [1-9]: ')"
   printf "\n"
   case "${choice}" in
     1) start_service ;;
@@ -1043,10 +734,8 @@ menu_once() {
     5) restart_service ;;
     6) clear 2>/dev/null || true; header; systemctl --no-pager status "${SERVICE_NAME}" || true; line ;;
     7) menu_browser_proxy ;;
-    8) menu_bridges ;;
-    9) route_test ;;
-    10) launch_nyx ;;
-    11) return 1 ;;
+    8) route_test ;;
+    9) return 1 ;;
     *) err "Invalid option." ;;
   esac
   return 0
