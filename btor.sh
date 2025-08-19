@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# BTor - Tor manager with robust UI, proxy helpers, and Tor route test
+# BTor - Tor manager with robust UI, proxy helpers, Tor Browser autodetect/autoinstall, and Tor route test
 
 # -----------------------------
 # Config
@@ -11,8 +11,9 @@ BTOR_HOME="${BTOR_HOME:-$HOME/.btor}"
 BTOR_BIN_LINK="${BTOR_BIN_LINK:-/usr/local/bin/btor}"
 BTOR_RAW_URL_DEFAULT="https://raw.githubusercontent.com/linux-brat/BTor/main/btor.sh"
 BTOR_RAW_URL="${BTOR_REPO_RAW:-$BTOR_RAW_URL_DEFAULT}"
-BTOR_VERSION="${BTOR_VERSION:-0.5.0}"
+BTOR_VERSION="${BTOR_VERSION:-0.5.2}"
 
+# Tor Browser install base
 TOR_BROWSER_DIR_DEFAULT="$HOME/.local/tor-browser"
 TOR_BROWSER_DIR="${BTOR_TOR_BROWSER_DIR:-$TOR_BROWSER_DIR_DEFAULT}"
 
@@ -180,21 +181,59 @@ install_or_update_tor() {
 }
 
 # -----------------------------
-# Tor Browser
+# Tor Browser detection and install
 # -----------------------------
-tor_browser_bin() {
-  if [ -x "${TOR_BROWSER_DIR}/tor-browser/Browser/start-tor-browser" ]; then
-    printf "%s" "${TOR_BROWSER_DIR}/tor-browser/Browser/start-tor-browser"
-    return
-  fi
-  local cand=""
-  cand="$(find "${TOR_BROWSER_DIR}" -type f -name start-tor-browser -perm -111 2>/dev/null | head -n1 || true)"
-  if [ -n "$cand" ]; then
-    printf "%s" "$cand"
-  else
-    printf ""
-  fi
+tor_browser_candidates() {
+  # Print candidate launchers or paths, one per line
+  cat <<EOF
+${TOR_BROWSER_DIR}/tor-browser/Browser/start-tor-browser
+${TOR_BROWSER_DIR}/start-tor-browser
+$HOME/tor-browser/Browser/start-tor-browser
+$HOME/Applications/Tor Browser/start-tor-browser
+/opt/tor-browser/Browser/start-tor-browser
+EOF
+  # .desktop search for executable paths (best-effort)
+  # We just hint; main detection uses file existence and executable bit.
 }
+
+tor_browser_bin() {
+  # Try explicit candidates
+  while IFS= read -r path; do
+    [ -z "${path:-}" ] && continue
+    if [ -x "$path" ]; then
+      printf "%s" "$path"
+      return
+    fi
+  done <<EOF
+$(tor_browser_candidates)
+EOF
+
+  # Try to find start-tor-browser under TOR_BROWSER_DIR
+  if [ -d "$TOR_BROWSER_DIR" ]; then
+    local cand
+    cand="$(find "$TOR_BROWSER_DIR" -type f -name start-tor-browser -perm -111 2>/dev/null | head -n1 || true)"
+    if [ -n "$cand" ]; then
+      printf "%s" "$cand"
+      return
+    fi
+  fi
+
+  # Try well-known paths regardless of TOR_BROWSER_DIR
+  local more=0
+  for path in "$HOME" "$HOME/Applications" "/opt"; do
+    if [ -d "$path" ]; then
+      local c
+      c="$(find "$path" -type f -name start-tor-browser -perm -111 2>/dev/null | head -n1 || true)"
+      if [ -n "$c" ]; then
+        printf "%s" "$c"
+        return
+      fi
+    fi
+  done
+
+  printf ""
+}
+
 download_tor_browser() {
   header
   center_line "$(bold)Install Tor Browser$(reset)" "$BTOR_W"
@@ -215,6 +254,22 @@ download_tor_browser() {
     err "Download failed."
   fi
   line
+}
+
+ensure_tor_browser() {
+  # If Tor Browser is missing, auto-install silently (as requested)
+  local bin
+  bin="$(tor_browser_bin || true)"
+  if [ -z "$bin" ]; then
+    warn "Tor Browser not found. Installing automatically..."
+    download_tor_browser
+    bin="$(tor_browser_bin || true)"
+    if [ -z "$bin" ]; then
+      err "Tor Browser still not found after install attempt."
+      return 1
+    fi
+  fi
+  return 0
 }
 
 # -----------------------------
@@ -271,14 +326,19 @@ start_service() {
   sudo systemctl start "${SERVICE_NAME}" || true
   if tor_active; then
     ok "Started ${SERVICE_NAME}."
+    # Ensure Tor Browser exists; auto-install if missing
     if confirm "Open Tor Browser now? [y/N]: "; then
-      local bin
-      bin="$(tor_browser_bin || true)"
-      if [ -n "$bin" ]; then
-        nohup "$bin" >/dev/null 2>&1 &
-        ok "Tor Browser launched."
+      if ensure_tor_browser; then
+        local bin
+        bin="$(tor_browser_bin || true)"
+        if [ -n "$bin" ]; then
+          nohup "$bin" >/dev/null 2>&1 &
+          ok "Tor Browser launched."
+        else
+          err "Tor Browser not found even after install."
+        fi
       else
-        warn "Tor Browser not found. Use 'Install Tor Browser' from the menu."
+        err "Tor Browser install failed."
       fi
     fi
   else
@@ -320,11 +380,13 @@ gnome_proxy_unset() {
 }
 
 firefox_profiles_dirs() {
+  # Print each profile directory on its own line; no unbound vars
   local base1="$HOME/.mozilla/firefox"
   local base2="$HOME/snap/firefox/common/.mozilla/firefox"
   if [ -d "$base1" ]; then find "$base1" -maxdepth 1 -type d -name "*.default*" 2>/dev/null; fi
   if [ -d "$base2" ]; then find "$base2" -maxdepth 1 -type d -name "*.default*" 2>/dev/null; fi
 }
+
 _ff_write_userjs() {
   local dir="$1" f="$dir/user.js"
   cat > "$f" <<EOF
@@ -350,23 +412,29 @@ user_pref("network.proxy.no_proxies_on", "localhost");
 user_pref("network.proxy.socks_remote_dns", true);
 EOF
 }
+
 firefox_set_proxy_all() {
   local found=0
-  for d in $(firefox_profiles_dirs || true); do
+  while IFS= read -r d; do
+    [ -z "${d:-}" ] && continue
     found=1
     _ff_write_userjs "$d" || true
     _ff_touch_prefs "$d" || true
     ok "Firefox proxy set for: $d"
-  done
+  done <<EOF
+$(firefox_profiles_dirs || true)
+EOF
   if [ "$found" -eq 0 ]; then
     warn "No Firefox profiles found. Start Firefox once, then re-run."
   else
     warn "Ensure Firefox was fully closed before applying; restart Firefox to use Tor."
   fi
 }
+
 firefox_unset_proxy_all() {
   local found=0
-  for d in $(firefox_profiles_dirs || true); do
+  while IFS= read -r d; do
+    [ -z "${d:-}" ] && continue
     found=1
     local f="$d/user.js" p="$d/prefs.js"
     if [ -f "$f" ]; then
@@ -378,7 +446,9 @@ firefox_unset_proxy_all() {
       mv "$p.tmp" "$p" || true
     fi
     ok "Firefox proxy removed for: $d"
-  done
+  done <<EOF
+$(firefox_profiles_dirs || true)
+EOF
   [ "$found" -eq 0 ] && warn "No Firefox profiles found."
 }
 
@@ -418,7 +488,7 @@ proxy_set_all() {
   gnome_proxy_set || true
   firefox_set_proxy_all
   local any=0
-  while read -r c; do
+  while IFS= read -r c; do
     [ -z "${c:-}" ] && continue
     if command -v "$c" >/dev/null 2>&1; then
       make_wrapper "$c" && any=1 || true
@@ -462,7 +532,8 @@ proxy_status() {
   fi
   printf "\n"
   local any=0
-  for d in $(firefox_profiles_dirs || true); do
+  while IFS= read -r d; do
+    [ -z "${d:-}" ] && continue
     any=1
     center_line "Firefox profile: $d" "$BTOR_W"
     if [ -f "$d/user.js" ]; then
@@ -471,7 +542,9 @@ proxy_status() {
       center_line "  user.js not present" "$BTOR_W"
     fi
     printf "\n"
-  done
+  done <<EOF
+$(firefox_profiles_dirs || true)
+EOF
   [ "$any" -eq 0 ] && center_line "Firefox: no profiles detected" "$BTOR_W"
   printf "\n"
   center_line "Wrappers dir: $browser_wrapper_dir" "$BTOR_W"
@@ -558,10 +631,11 @@ menu_once() {
   center_line "6) Show full status" "$BTOR_W"
   center_line "7) Browser Proxy (Set/Unset/Status)" "$BTOR_W"
   center_line "8) Tor Route Test (check.torproject.org)" "$BTOR_W"
-  center_line "9) Quit" "$BTOR_W"
+  center_line "9) Install Tor Browser" "$BTOR_W"
+  center_line "10) Quit" "$BTOR_W"
   printf "\n"
   local choice
-  choice="$(read_tty "Select an option [1-9]: ")"
+  choice="$(read_tty "Select an option [1-10]: ")"
   printf "\n"
   case "${choice}" in
     1) start_service ;;
@@ -572,7 +646,8 @@ menu_once() {
     6) clear 2>/dev/null || true; header; systemctl --no-pager status "${SERVICE_NAME}" || true; line ;;
     7) menu_browser_proxy ;;
     8) route_test ;;
-    9) return 1 ;;
+    9) download_tor_browser ;;
+    10) return 1 ;;
     *) err "Invalid option." ;;
   esac
   return 0
