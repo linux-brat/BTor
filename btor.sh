@@ -1,31 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# BTor - Tor manager with first-run setup, styled UI, and browser proxy helper (hardened)
+# BTor - Tor manager with robust UI, proxy helpers, and Tor route test
 
 # -----------------------------
-# Config (overridable via env)
+# Config
 # -----------------------------
 SERVICE_NAME="${BTOR_SERVICE_NAME:-tor.service}"
 BTOR_HOME="${BTOR_HOME:-$HOME/.btor}"
 BTOR_BIN_LINK="${BTOR_BIN_LINK:-/usr/local/bin/btor}"
 BTOR_RAW_URL_DEFAULT="https://raw.githubusercontent.com/linux-brat/BTor/main/btor.sh"
 BTOR_RAW_URL="${BTOR_REPO_RAW:-$BTOR_RAW_URL_DEFAULT}"
-BTOR_VERSION="${BTOR_VERSION:-0.3.6}"
+BTOR_VERSION="${BTOR_VERSION:-0.4.0}"
 
 TOR_BROWSER_DIR_DEFAULT="$HOME/.local/tor-browser"
 TOR_BROWSER_DIR="${BTOR_TOR_BROWSER_DIR:-$TOR_BROWSER_DIR_DEFAULT}"
 
 BTOR_SOCKS_HOST="${BTOR_SOCKS_HOST:-127.0.0.1}"
 BTOR_SOCKS_PORT="${BTOR_SOCKS_PORT:-9050}"
+BTOR_SOCKS_PORT_ALT="${BTOR_SOCKS_PORT_ALT:-9150}"  # Tor Browser’s default
 
-# UI tuning
-BTOR_SPLASH_SPEED="${BTOR_SPLASH_SPEED:-0.02}"   # seconds per line delay
-BTOR_SPLASH_PAUSE="${BTOR_SPLASH_PAUSE:-0.05}"   # spinner tick
+# UI
 BTOR_FRAME_WIDTH="${BTOR_FRAME_WIDTH:-64}"
 
 # -----------------------------
-# UI helpers
+# Basic helpers
 # -----------------------------
 bold() { tput bold 2>/dev/null || true; }
 reset() { tput sgr0 2>/dev/null || true; }
@@ -36,6 +35,16 @@ blue() { tput setaf 4 2>/dev/null || true; }
 magenta() { tput setaf 5 2>/dev/null || true; }
 cyan() { tput setaf 6 2>/dev/null || true; }
 
+term_cols() { tput cols 2>/dev/null || echo 80; }
+clamp_width() {
+  local w="${1:-$BTOR_FRAME_WIDTH}"
+  local cols; cols="$(term_cols)"
+  # Ensure frame never exceeds terminal width and not too tiny
+  if (( w > cols-2 )); then w=$((cols-2)); fi
+  if (( w < 48 )); then w=48; fi
+  echo "$w"
+}
+
 info() { echo "$(blue)$(bold)[i]$(reset) $*"; }
 ok() { echo "$(green)$(bold)[ok]$(reset) $*"; }
 warn() { echo "$(yellow)$(bold)[warn]$(reset) $*"; }
@@ -43,12 +52,33 @@ err() { echo "$(red)$(bold)[err]$(reset) $*"; }
 
 need_sudo() { if [[ $EUID -ne 0 ]]; then sudo -v || true; fi; }
 have_systemctl() { command -v systemctl >/dev/null 2>&1; }
-is_stdin_tty() { [[ -t 0 ]]; }
-have_dev_tty() { [[ -r /dev/tty ]]; }
+is_tty() { [[ -t 0 ]] || [[ -r /dev/tty ]]; }
+
+read_tty() {
+  local prompt="$1"
+  if [[ -t 0 ]]; then
+    read -rp "$prompt" __ans || true
+    echo "${__ans:-}"
+  elif [[ -r /dev/tty ]]; then
+    printf "%s" "$prompt" >&2
+    local line=""
+    IFS= read -r line < /dev/tty || true
+    echo "${line:-}"
+  else
+    echo ""
+  fi
+}
+
+confirm() {
+  local ans; ans="$(read_tty "${1:-Proceed? [y/N]: }")"
+  [[ "${ans,,}" == "y" || "${ans,,}" == "yes" ]]
+}
+
+sleepf() { sleep "${1:-0.05}"; }
 
 center_line() {
-  local text="$1" width="${2:-$BTOR_FRAME_WIDTH}"
-  local len=${#text}
+  local text="$1"; local width="$2"
+  local len="${#text}"
   if (( len >= width )); then
     echo "$text"
     return
@@ -58,88 +88,26 @@ center_line() {
 }
 
 box_line() {
-  local char="${1:-─}" width="${2:-$BTOR_FRAME_WIDTH}"
+  local char="${1:-─}" width="${2}"
   printf "%s\n" "$(printf "%${width}s" "" | tr " " "$char")"
-}
-
-tty_read() {
-  local prompt="$1"
-  if is_stdin_tty; then
-    read -rp "$prompt" __choice || true
-    echo "${__choice:-}"
-    return
-  fi
-  if have_dev_tty; then
-    printf "%s" "$prompt" >&2
-    local line=""
-    IFS= read -r line < /dev/tty || true
-    echo "${line:-}"
-    return
-  fi
-  err "No interactive TTY available."
-  exit 1
-}
-
-confirm() {
-  local prompt="${1:-Proceed? [y/N]: }"
-  local ans
-  ans="$(tty_read "$prompt")"
-  [[ "${ans,,}" == "y" || "${ans,,}" == "yes" ]]
-}
-
-press_enter_once() {
-  if is_stdin_tty || have_dev_tty; then
-    tty_read "Press Enter to continue..."
-  fi
-}
-
-sleepf() { sleep "${1:-0.05}"; }
-
-# -----------------------------
-# ASCII UI (your block, centered)
-# -----------------------------
-draw_banner() {
-  local w="${1:-$BTOR_FRAME_WIDTH}"
-  local lines=(
-"$(cyan)██████╗░████████╗░█████╗░██████╗░$(reset)"
-"$(cyan)██╔══██╗╚══██╔══╝██╔══██╗██╔══██╗$(reset)"
-"$(cyan)██████╦╝░░░██║░░░██║░░██║██████╔╝$(reset)"
-"$(cyan)██╔══██╗░░░██║░░░██║░░██║██╔══██╗$(reset)"
-"$(cyan)██████╦╝░░░██║░░░╚█████╔╝██║░░██║$(reset)"
-"$(cyan)╚═════╝░░░░╚═╝░░░░╚════╝░╚═╝░░╚═╝$(reset)"
-  )
-  for l in "${lines[@]}"; do
-    center_line "$l" "$w"
-    sleepf "$BTOR_SPLASH_SPEED"
-  done
-  center_line "$(magenta)$(bold)Tor service manager · v${BTOR_VERSION}$(reset)" "$w"
-}
-
-splash() {
-  clear 2>/dev/null || true
-  local w="$BTOR_FRAME_WIDTH"
-  box_line "═" "$w"
-  draw_banner "$w"
-  box_line "═" "$w"
-  # Loading spinner (no ANSI cursor tricks to avoid weird terminals)
-  local spins=('⠋' '⠙' '⠸' '⠼' '⠴' '⠦' '⠇')
-  for i in $(seq 1 14); do
-    local idx=$(( (i-1) % ${#spins[@]} ))
-    center_line "$(bold)${spins[$idx]} Loading...$(reset)" "$w"
-    sleepf "$BTOR_SPLASH_PAUSE"
-  done
-  center_line "$(bold)✔ Ready$(reset)" "$w"
-  box_line "─" "$w"
 }
 
 header() {
   clear 2>/dev/null || true
-  local w="$BTOR_FRAME_WIDTH"
+  local w; w="$(clamp_width "$BTOR_FRAME_WIDTH")"
   box_line "═" "$w"
-  draw_banner "$w"
+  center_line "$(cyan)██████╗░████████╗░█████╗░██████╗░$(reset)" "$w"
+  center_line "$(cyan)██╔══██╗╚══██╔══╝██╔══██╗██╔══██╗$(reset)" "$w"
+  center_line "$(cyan)██████╦╝░░░██║░░░██║░░██║██████╔╝$(reset)" "$w"
+  center_line "$(cyan)██╔══██╗░░░██║░░░██║░░██║██╔══██╗$(reset)" "$w"
+  center_line "$(cyan)██████╦╝░░░██║░░░╚█████╔╝██║░░██║$(reset)" "$w"
+  center_line "$(cyan)╚═════╝░░░░╚═╝░░░░╚════╝░╚═╝░░╚═╝$(reset)" "$w"
+  center_line "$(magenta)$(bold)Tor service manager · v${BTOR_VERSION}$(reset)" "$w"
   box_line "─" "$w"
+  export BTOR_W="$w"
 }
-line() { box_line "─" "$BTOR_FRAME_WIDTH"; }
+
+line() { box_line "─" "${BTOR_W:-64}"; }
 
 # -----------------------------
 # OS / PM
@@ -165,13 +133,14 @@ pm_install() {
 }
 
 # -----------------------------
-# Tor checks
+# Tor and Tor Browser
 # -----------------------------
 tor_cli_installed() { command -v tor >/dev/null 2>&1; }
 tor_service_exists() { systemctl list-unit-files 2>/dev/null | grep -q "^${SERVICE_NAME}\b" || systemctl status "${SERVICE_NAME}" >/dev/null 2>&1; }
+tor_active() { systemctl is-active "${SERVICE_NAME}" 2>/dev/null | grep -q '^active$'; }
 
 install_or_update_tor() {
-  info "Checking Tor installation..."
+  header; center_line "$(bold)Check Tor$(reset)" "$BTOR_W"; line
   tor_cli_installed && ok "Tor CLI found: $(command -v tor)" || warn "Tor CLI not found."
   tor_service_exists && ok "Tor unit found: ${SERVICE_NAME}" || warn "Tor unit ${SERVICE_NAME} not found."
   if tor_cli_installed && tor_service_exists; then
@@ -179,26 +148,20 @@ install_or_update_tor() {
       case "$(pm_detect)" in
         apt) need_sudo; sudo apt-get update -y || true; sudo apt-get install -y tor || true;;
         dnf|yum|pacman|zypper) pm_install tor || true;;
-        *) warn "Unknown package manager. Skipping Tor update.";;
+        *) warn "Unknown package manager. Skipping."; ;
       esac
     fi
-    return 0
-  fi
-  if confirm "Tor missing/incomplete. Install Tor now? [y/N]: "; then
-    case "$(pm_detect)" in
-      apt|dnf|yum|pacman|zypper) pm_install tor || true;;
-      *) warn "Unsupported package manager. Install Tor manually."; return 1;;
-    esac
-    ok "Tor install attempted."
   else
-    warn "Skipped Tor installation."
-    return 1
+    if confirm "Tor missing/incomplete. Install Tor now? [y/N]: "; then
+      case "$(pm_detect)" in
+        apt|dnf|yum|pacman|zypper) pm_install tor || true;;
+        *) warn "Unsupported package manager. Install Tor manually.";;
+      esac
+    fi
   fi
+  line; sleepf 0.2
 }
 
-# -----------------------------
-# Tor Browser
-# -----------------------------
 tor_browser_bin() {
   if [[ -x "${TOR_BROWSER_DIR}/tor-browser/Browser/start-tor-browser" ]]; then
     echo "${TOR_BROWSER_DIR}/tor-browser/Browser/start-tor-browser"; return
@@ -207,53 +170,24 @@ tor_browser_bin() {
   [[ -n "$cand" ]] && echo "$cand" || echo ""
 }
 download_tor_browser() {
+  header; center_line "$(bold)Install Tor Browser$(reset)" "$BTOR_W"; line
   local url="https://www.torproject.org/dist/torbrowser/13.5.2/tor-browser-linux64-13.5.2_ALL.tar.xz"
   url="${BTOR_TB_URL:-$url}"
   mkdir -p "${TOR_BROWSER_DIR}" || true
-  info "Downloading Tor Browser..."
+  info "Downloading Tor Browser (this may take a while)..."
   curl -fL --progress-bar "$url" -o "${TOR_BROWSER_DIR}/tor-browser.tar.xz" || { warn "Download failed."; return 1; }
   info "Extracting..."
   tar -xf "${TOR_BROWSER_DIR}/tor-browser.tar.xz" -C "${TOR_BROWSER_DIR}" || { warn "Extract failed."; return 1; }
   rm -f "${TOR_BROWSER_DIR}/tor-browser.tar.xz" || true
-  ok "Tor Browser ready."
-}
-install_or_update_tor_browser() {
-  info "Checking Tor Browser..."
-  local bin; bin="$(tor_browser_bin)"
-  if [[ -n "$bin" ]]; then
-    ok "Tor Browser found."
-    return 0
-  fi
-  warn "Tor Browser not found."
-  if confirm "Download Tor Browser now? [y/N]: "; then
-    download_tor_browser || true
-  else
-    warn "Skipped Tor Browser."
-    return 1
-  fi
+  ok "Tor Browser ready at ${TOR_BROWSER_DIR}"; line
+  sleepf 0.2
 }
 
 # -----------------------------
-# First-run
-# -----------------------------
-first_run_marker() { echo "${BTOR_HOME}/.first_run_done"; }
-first_run_needed() { [[ ! -f "$(first_run_marker)" ]]; }
-run_first_time_setup() {
-  header; center_line "$(bold)First-time setup$(reset)"; line
-  mkdir -p "${BTOR_HOME}" || true
-  install_or_update_tor || true
-  echo
-  install_or_update_tor_browser || true
-  touch "$(first_run_marker)" || true
-  ok "Setup complete."; line
-  press_enter_once
-}
-
-# -----------------------------
-# Install / Update
+# Install / Update / Uninstall BTor
 # -----------------------------
 install_self() {
-  header; center_line "$(bold)Installing BTor$(reset)"; line
+  header; center_line "$(bold)Installing BTor$(reset)" "$BTOR_W"; line
   mkdir -p "${BTOR_HOME}" || true
   if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE}" ]]; then
     cp "${BASH_SOURCE}" "${BTOR_HOME}/btor" || true
@@ -265,13 +199,13 @@ install_self() {
   ok "Installed. Use: btor"; line
 }
 uninstall_self() {
-  header; center_line "$(bold)Uninstalling BTor$(reset)"; line
+  header; center_line "$(bold)Uninstalling BTor$(reset)" "$BTOR_W"; line
   need_sudo; sudo rm -f "${BTOR_BIN_LINK}" || true
   rm -rf "${BTOR_HOME}" || true
   ok "Uninstalled."; line
 }
 self_update() {
-  header; center_line "$(bold)Updating BTor$(reset)"; line
+  header; center_line "$(bold)Updating BTor$(reset)" "$BTOR_W"; line
   mkdir -p "${BTOR_HOME}" || true
   curl -fsSL "${BTOR_RAW_URL}" -o "${BTOR_HOME}/btor.new" || true
   chmod +x "${BTOR_HOME}/btor.new" || true
@@ -280,19 +214,23 @@ self_update() {
 }
 
 # -----------------------------
-# Service ops (with open browser prompt)
+# Service operations (with prompt to open Tor Browser)
 # -----------------------------
 start_service() {
   need_sudo; sudo systemctl start "${SERVICE_NAME}" || true
-  ok "Started ${SERVICE_NAME}."
-  if confirm "Open Tor Browser now? [y/N]: "; then
-    local bin; bin="$(tor_browser_bin || true)"
-    if [[ -n "$bin" ]]; then
-      nohup "$bin" >/dev/null 2>&1 &
-      ok "Tor Browser launched."
-    else
-      warn "Tor Browser not found; run Browser setup from main menu."
+  if tor_active; then
+    ok "Started ${SERVICE_NAME}."
+    if confirm "Open Tor Browser now? [y/N]: "; then
+      local bin; bin="$(tor_browser_bin || true)"
+      if [[ -n "$bin" ]]; then
+        nohup "$bin" >/dev/null 2>&1 &
+        ok "Tor Browser launched."
+      else
+        warn "Tor Browser not found. Use 'Install Tor Browser' from the menu."
+      fi
     fi
+  else
+    err "Failed to start ${SERVICE_NAME}. Check 'Show full status' for details."
   fi
 }
 stop_service()    { need_sudo; sudo systemctl stop    "${SERVICE_NAME}" || true; ok "Stopped ${SERVICE_NAME}."; }
@@ -308,14 +246,14 @@ show_status() {
   local a e
   [[ "${is_active}" == "active" ]] && a="$(green)active$(reset)" || a="$(red)${is_active:-unknown}$(reset)"
   [[ "${is_enabled}" == "enabled" ]] && e="$(green)enabled$(reset)" || e="$(yellow)${is_enabled:-unknown}$(reset)"
-  center_line "Service: ${SERVICE_NAME}"
-  center_line "Status: ${a} | Boot: ${e}"
+  center_line "Service: ${SERVICE_NAME}" "$BTOR_W"
+  center_line "Status: ${a} | Boot: ${e}" "$BTOR_W"
 }
 
 # -----------------------------
 # Browser Proxy helper
 # -----------------------------
-# GNOME system proxy
+# GNOME system proxy (optional)
 gnome_proxy_set() {
   if ! command -v gsettings >/dev/null 2>&1; then warn "gsettings not found (GNOME proxy not available)."; return 1; fi
   gsettings set org.gnome.system.proxy mode 'manual' || true
@@ -330,7 +268,7 @@ gnome_proxy_unset() {
   fi
 }
 
-# Firefox per-profile (user.js + ensure prefs.js has the same)
+# Firefox profiles
 firefox_profiles_dirs() {
   local base1="$HOME/.mozilla/firefox" base2="$HOME/snap/firefox/common/.mozilla/firefox"
   for b in "$base1" "$base2"; do [[ -d "$b" ]] && find "$b" -maxdepth 1 -type d -name "*.default*" 2>/dev/null; done
@@ -342,7 +280,7 @@ _ff_write_userjs() {
 user_pref("network.proxy.type", 1);
 user_pref("network.proxy.socks", "${BTOR_SOCKS_HOST}");
 user_pref("network.proxy.socks_port", ${BTOR_SOCKS_PORT});
-user_pref("network.proxy.no_proxies_on", "localhost, 127.0.0.1, ::1");
+user_pref("network.proxy.no_proxies_on", "localhost");
 user_pref("network.proxy.socks_remote_dns", true);
 EOF
 }
@@ -356,164 +294,199 @@ _ff_touch_prefs() {
 user_pref("network.proxy.type", 1);
 user_pref("network.proxy.socks", "${BTOR_SOCKS_HOST}");
 user_pref("network.proxy.socks_port", ${BTOR_SOCKS_PORT});
-user_pref("network.proxy.no_proxies_on", "localhost, 127.0.0.1, ::1");
+user_pref("network.proxy.no_proxies_on", "localhost");
 user_pref("network.proxy.socks_remote_dns", true);
 EOF
 }
-firefox_set_proxy() {
-  local d="$1"
-  _ff_write_userjs "$d" || true
-  _ff_touch_prefs "$d" || true
-  ok "Firefox proxy configured in: $d"
+firefox_set_proxy_all() {
+  local any=0
+  for d in $(firefox_profiles_dirs 2>/dev/null || true); do
+    any=1
+    _ff_write_userjs "$d" || true
+    _ff_touch_prefs "$d" || true
+    ok "Firefox proxy set for: $d"
+  done
+  if [[ $any -eq 0 ]]; then
+    warn "No Firefox profiles found. Start Firefox once, then re-run this."
+  else
+    warn "Ensure Firefox was fully closed before applying, then restart Firefox."
+  fi
 }
-firefox_unset_proxy() {
-  local d="$1" f="$d/user.js" p="$d/prefs.js"
-  if [[ -f "$f" ]]; then
-    grep -v -E 'network\.proxy\.(type|socks"|socks_port|no_proxies_on|socks_remote_dns)' "$f" 2>/dev/null > "$f.tmp" || true
-    mv "$f.tmp" "$f" || true
-  fi
-  if [[ -f "$p" ]]; then
-    grep -v -E 'network\.proxy\.(type|socks"|socks_port|no_proxies_on|socks_remote_dns)' "$p" 2>/dev/null > "$p.tmp" || true
-    mv "$p.tmp" "$p" || true
-  fi
-  ok "Firefox proxy removed in: $d"
+firefox_unset_proxy_all() {
+  local any=0
+  for d in $(firefox_profiles_dirs 2>/dev/null || true); do
+    any=1
+    local f="$d/user.js" p="$d/prefs.js"
+    if [[ -f "$f" ]]; then
+      grep -v -E 'network\.proxy\.(type|socks"|socks_port|no_proxies_on|socks_remote_dns)' "$f" 2>/dev/null > "$f.tmp" || true
+      mv "$f.tmp" "$f" || true
+    fi
+    if [[ -f "$p" ]]; then
+      grep -v -E 'network\.proxy\.(type|socks"|socks_port|no_proxies_on|socks_remote_dns)' "$p" 2>/dev/null > "$p.tmp" || true
+      mv "$p.tmp" "$p" || true
+    fi
+    ok "Firefox proxy removed for: $d"
+  done
+  [[ $any -eq 0 ]] && warn "No Firefox profiles found."
 }
 
-# Chromium/Chrome/Brave via wrappers (--proxy-server)
+# Chromium-family: find binaries and create wrapper with socks + host resolver rules
 browser_wrapper_dir="${BTOR_HOME}/proxy-wrappers"
+chromium_candidates() {
+  # Cover common binary names, including snap and flatpak run commands
+  cat <<EOF
+chromium
+chromium-browser
+google-chrome
+google-chrome-stable
+brave
+brave-browser
+microsoft-edge
+microsoft-edge-stable
+vivaldi
+flatpak run org.chromium.Chromium
+flatpak run com.google.Chrome
+flatpak run com.brave.Browser
+flatpak run com.microsoft.Edge
+EOF
+}
 make_wrapper() {
-  local app="$1" bin; bin="$(command -v "$app" || true)"
-  [[ -z "$bin" ]] && return 1
+  local app="$1" bin=""
+  if [[ "$app" == flatpak* ]]; then
+    command -v flatpak >/dev/null 2>&1 || return 1
+    # keep whole command as launcher
+    bin="$app"
+  else
+    bin="$(command -v "$app" || true)"
+    [[ -z "$bin" ]] && return 1
+  fi
   mkdir -p "$browser_wrapper_dir" || true
-  local wrapper="${browser_wrapper_dir}/${app}"
+  local safe_name; safe_name="$(echo "$app" | tr ' /' '__')"
+  local wrapper="${browser_wrapper_dir}/${safe_name}"
   cat > "$wrapper" <<EOF
 #!/usr/bin/env bash
-exec "$bin" --proxy-server="socks5://${BTOR_SOCKS_HOST}:${BTOR_SOCKS_PORT}" "\$@"
+exec $bin --proxy-server="socks5://${BTOR_SOCKS_HOST}:${BTOR_SOCKS_PORT}" --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE localhost" "\$@"
 EOF
   chmod +x "$wrapper" || true
-  ok "Wrapper created: $wrapper"
+  ok "Wrapper: $wrapper"
 }
-remove_wrapper() { rm -f "${browser_wrapper_dir}/${1}" 2>/dev/null || true; }
+remove_wrappers() { rm -rf "$browser_wrapper_dir" 2>/dev/null || true; }
 
 proxy_set_all() {
-  header; center_line "$(bold)Setting Browser Proxy$(reset)"; line
+  header; center_line "$(bold)Setting Browser Proxy$(reset)" "$BTOR_W"; line
   gnome_proxy_set || true
-  local found_ff=0
-  for d in $(firefox_profiles_dirs 2>/dev/null || true); do
-    found_ff=1
-    firefox_set_proxy "$d" || true
-  done
-  [[ $found_ff -eq 0 ]] && warn "No Firefox profiles detected."
-  local apps=(chromium google-chrome google-chrome-stable brave brave-browser microsoft-edge-stable vivaldi)
-  local created=0
-  for a in "${apps[@]}"; do
-    if command -v "$a" >/dev/null 2>&1; then
-      make_wrapper "$a" && created=1
+  firefox_set_proxy_all
+  local any=0
+  while read -r c; do
+    [[ -z "$c" ]] && continue
+    if [[ "$c" == flatpak* ]]; then
+      command -v flatpak >/dev/null 2>&1 || continue
+      # test if app exists (best-effort)
+      make_wrapper "$c" && any=1 || true
+    else
+      command -v "$c" >/dev/null 2>&1 && { make_wrapper "$c" && any=1 || true; }
     fi
-  done
-  if [[ $created -eq 1 ]]; then
-    echo
-    center_line "Use the wrapper to launch with proxy:"
-    center_line "${browser_wrapper_dir}/chromium (example)"
+  done < <(chromium_candidates)
+  if [[ $any -eq 1 ]]; then
+    center_line "Use wrappers in: ${browser_wrapper_dir}" "$BTOR_W"
   else
-    warn "Chromium/Chrome/Brave not found or wrappers not created."
+    warn "No Chromium-family browsers detected for wrappers."
   fi
-  line
-  press_enter_once
+  line; sleepf 0.2
 }
 
 proxy_unset_all() {
-  header; center_line "$(bold)Removing Browser Proxy$(reset)"; line
-  gnome_proxy_unset || true
-  local found_ff=0
-  for d in $(firefox_profiles_dirs 2>/dev/null || true); do
-    found_ff=1
-    firefox_unset_proxy "$d" || true
-  done
-  [[ $found_ff -eq 0 ]] && warn "No Firefox profiles detected."
-  local apps=(chromium google-chrome google-chrome-stable brave brave-browser microsoft-edge-stable vivaldi)
-  for a in "${apps[@]}"; do remove_wrapper "$a" || true; done
-  [[ -d "$browser_wrapper_dir" ]] && rmdir "$browser_wrapper_dir" 2>/dev/null || true
-  ok "Proxy cleaned."
-  line
-  press_enter_once
+  header; center_line "$(bold)Removing Browser Proxy$(reset)" "$BTOR_W"; line
+  gsettings --version >/dev/null 2>&1 && gnome_proxy_unset || true
+  firefox_unset_proxy_all
+  remove_wrappers
+  ok "Proxy settings removed." ; line
+  sleepf 0.2
 }
 
 proxy_status() {
-  header; center_line "$(bold)Proxy Status$(reset)"; line
-  center_line "Target: ${BTOR_SOCKS_HOST}:${BTOR_SOCKS_PORT}"
+  header; center_line "$(bold)Proxy Status$(reset)" "$BTOR_W"; line
+  center_line "Target: ${BTOR_SOCKS_HOST}:${BTOR_SOCKS_PORT}" "$BTOR_W"
   echo
   if command -v gsettings >/dev/null 2>&1; then
     local mode host port
     mode="$(gsettings get org.gnome.system.proxy mode 2>/dev/null || echo unknown)"
     host="$(gsettings get org.gnome.system.proxy.socks host 2>/dev/null || echo '')"
     port="$(gsettings get org.gnome.system.proxy.socks port 2>/dev/null || echo '')"
-    center_line "GNOME: mode=$mode socks=${host//\'/}:${port}"
+    center_line "GNOME: mode=$mode socks=${host//\'/}:${port}" "$BTOR_W"
   else
-    center_line "GNOME: gsettings not available"
+    center_line "GNOME: gsettings not available" "$BTOR_W"
   fi
   echo
   local any=0
   for d in $(firefox_profiles_dirs 2>/dev/null || true); do
     any=1
-    center_line "Firefox profile: $d"
-    if [[ -f "$d/user.js" ]]; then
-      grep -E 'network\.proxy\.(type|socks|socks_port|socks_remote_dns)' "$d/user.js" 2>/dev/null | sed 's/^/  /' || true
-    else
-      center_line "  user.js not present"
-    fi
+    center_line "Firefox profile: $d" "$BTOR_W"
+    [[ -f "$d/user.js" ]] && grep -E 'network\.proxy\.(type|socks|socks_port|socks_remote_dns)' "$d/user.js" 2>/dev/null | sed 's/^/  /' || center_line "  user.js not present" "$BTOR_W"
     echo
   done
-  [[ $any -eq 0 ]] && center_line "Firefox: no profiles detected"
+  [[ $any -eq 0 ]] && center_line "Firefox: no profiles detected" "$BTOR_W"
   echo
-  center_line "Wrappers dir: $browser_wrapper_dir"
-  ls -1 "$browser_wrapper_dir" 2>/dev/null | sed 's/^/  /' || center_line "(no wrappers)"
-  line
-  press_enter_once
-}
-
-browser_proxy_menu() {
-  while true; do
-    header
-    center_line "$(bold)Browser Proxy$(reset)"
-    center_line "SOCKS ${BTOR_SOCKS_HOST}:${BTOR_SOCKS_PORT}"
-    line
-    center_line "1) Set proxy (GNOME + Firefox + wrappers)"
-    center_line "2) Remove proxy"
-    center_line "3) Status"
-    center_line "4) Back"
-    echo
-    local choice; choice="$(tty_read "Select an option [1-4]: ")"
-    case "$choice" in
-      1) proxy_set_all ;;
-      2) proxy_unset_all ;;
-      3) proxy_status ;;
-      4) break ;;
-      *) err "Invalid option." ;;
-    esac
-  done
+  center_line "Wrappers dir: $browser_wrapper_dir" "$BTOR_W"
+  ls -1 "$browser_wrapper_dir" 2>/dev/null | sed 's/^/  /' || center_line "(no wrappers)" "$BTOR_W"
+  line; sleepf 0.2
 }
 
 # -----------------------------
-# Menu
+# Route test (check.torproject.org via SOCKS)
+# -----------------------------
+route_test() {
+  header; center_line "$(bold)Tor Route Test$(reset)" "$BTOR_W"; line
+  if ! tor_active; then
+    warn "Tor service is not active. Start it first from the menu."
+    line; return
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "curl not found. Install curl to run the test."
+    line; return
+  fi
+  center_line "Testing through ${BTOR_SOCKS_HOST}:${BTOR_SOCKS_PORT} ..." "$BTOR_W"
+  # Try primary port then fallback to Tor Browser port
+  local ok_primary=0 ok_alt=0
+  if curl --socks5-hostname "${BTOR_SOCKS_HOST}:${BTOR_SOCKS_PORT}" -s https://check.torproject.org/ | grep -q "Congratulations. This browser is configured to use Tor"; then
+    ok_primary=1
+  elif curl --socks5-hostname "${BTOR_SOCKS_HOST}:${BTOR_SOCKS_PORT_ALT}" -s https://check.torproject.org/ | grep -q "Congratulations. This browser is configured to use Tor"; then
+    ok_alt=1
+  fi
+  if (( ok_primary == 1 )); then
+    ok "Tor routing OK via ${BTOR_SOCKS_HOST}:${BTOR_SOCKS_PORT}"
+  elif (( ok_alt == 1 )); then
+    ok "Tor routing OK via ${BTOR_SOCKS_HOST}:${BTOR_SOCKS_PORT_ALT}"
+  else
+    err "Not using Tor. Fix tips:"
+    echo " - Ensure Tor is active (Start tor.service)."
+    echo " - Ensure browser actually uses SOCKS ${BTOR_SOCKS_HOST}:${BTOR_SOCKS_PORT} (or 9150 if using Tor Browser)."
+    echo " - Firefox: fully close it before applying proxy; then restart."
+    echo " - Chromium: launch using the wrapper in ${browser_wrapper_dir}."
+  fi
+  line; sleepf 0.2
+}
+
+# -----------------------------
+# Main Menu
 # -----------------------------
 menu_once() {
   header
   show_status
   echo
-  center_line "$(bold)Options$(reset)"
+  center_line "$(bold)Options$(reset)" "$BTOR_W"
   line
-  center_line "1) Start tor.service"
-  center_line "2) Stop tor.service"
-  center_line "3) Enable at boot"
-  center_line "4) Disable at boot"
-  center_line "5) Restart tor.service"
-  center_line "6) Show full status"
-  center_line "7) Update BTor"
-  center_line "8) Browser Proxy (Set/Unset)"
-  center_line "9) Quit"
+  center_line "1) Start tor.service" "$BTOR_W"
+  center_line "2) Stop tor.service" "$BTOR_W"
+  center_line "3) Enable at boot" "$BTOR_W"
+  center_line "4) Disable at boot" "$BTOR_W"
+  center_line "5) Restart tor.service" "$BTOR_W"
+  center_line "6) Show full status" "$BTOR_W"
+  center_line "7) Browser Proxy (Set/Unset/Status)" "$BTOR_W"
+  center_line "8) Tor Route Test (check.torproject.org)" "$BTOR_W"
+  center_line "9) Quit" "$BTOR_W"
   echo
-  local choice; choice="$(tty_read "Select an option [1-9]: ")"
+  local choice; choice="$(read_tty "Select an option [1-9]: ")"
   echo
   case "${choice}" in
     1) start_service ;;
@@ -522,8 +495,27 @@ menu_once() {
     4) disable_service ;;
     5) restart_service ;;
     6) clear 2>/dev/null || true; header; systemctl --no-pager status "${SERVICE_NAME}" || true; line ;;
-    7) self_update ;;
-    8) browser_proxy_menu ;;
+    7)
+      while true; do
+        header
+        center_line "$(bold)Browser Proxy$(reset)" "$BTOR_W"; line
+        center_line "SOCKS ${BTOR_SOCKS_HOST}:${BTOR_SOCKS_PORT}" "$BTOR_W"
+        center_line "1) Set proxy (GNOME + Firefox + wrappers)" "$BTOR_W"
+        center_line "2) Remove proxy" "$BTOR_W"
+        center_line "3) Status" "$BTOR_W"
+        center_line "4) Back" "$BTOR_W"
+        echo
+        local bp; bp="$(read_tty "Select an option [1-4]: ")"
+        case "$bp" in
+          1) proxy_set_all ;;
+          2) proxy_unset_all ;;
+          3) proxy_status ;;
+          4) break ;;
+          *) err "Invalid option." ;;
+        esac
+      done
+      ;;
+    8) route_test ;;
     9) return 1 ;;
     *) err "Invalid option." ;;
   esac
@@ -533,12 +525,13 @@ menu_once() {
 menu_loop() {
   while true; do
     if ! menu_once; then break; fi
-    press_enter_once
+    # Single pause between top-level operations
+    if is_tty; then read_tty "Press Enter to continue... > " >/dev/null; fi
   done
 }
 
 # -----------------------------
-# Usage / CLI
+# CLI entry
 # -----------------------------
 usage() {
   cat <<EOF
@@ -550,35 +543,23 @@ Usage:
   bash btor.sh update            Update from ${BTOR_RAW_URL}
   bash btor.sh                   Launch interactive menu
 
-  btor                           Launch interactive menu (after install)
+  btor                           After install, launch menu
   btor start|stop|restart|enable|disable|status [--full]
   btor update                    Update installed copy
   btor uninstall                 Uninstall BTor
-
-Env:
-  BTOR_SERVICE_NAME              Service name (default: tor.service)
-  BTOR_HOME                      Install dir (default: \$HOME/.btor)
-  BTOR_BIN_LINK                  Symlink path (default: /usr/local/bin/btor)
-  BTOR_REPO_RAW                  Update URL (raw btor.sh)
-  BTOR_TOR_BROWSER_DIR           Tor Browser dir (default: \$HOME/.local/tor-browser)
-  BTOR_TB_URL                    Tor Browser tarball URL
-  BTOR_SOCKS_HOST                SOCKS host (default: 127.0.0.1)
-  BTOR_SOCKS_PORT                SOCKS port (default: 9050)
-  BTOR_FRAME_WIDTH               UI width (default: ${BTOR_FRAME_WIDTH})
 EOF
 }
 
-# -----------------------------
-# Entry
-# -----------------------------
 cli() {
-  if is_stdin_tty || have_dev_tty; then splash; fi
-
-  if [[ -z "${1:-}" ]] && ! is_stdin_tty; then
-    if have_dev_tty; then install_self; exec btor
-    else warn "No /dev/tty; running menu without installing."
-         if first_run_needed; then run_first_time_setup || true; fi
-         menu_loop; exit 0
+  # If piped, install then exec btor to get a TTY, else run menu
+  if [[ -z "${1:-}" ]] && ! [[ -t 0 ]]; then
+    if [[ -r /dev/tty ]]; then
+      install_self
+      exec btor
+    else
+      # No TTY: best-effort status print
+      show_status
+      exit 0
     fi
   fi
 
@@ -592,10 +573,15 @@ cli() {
     restart)   restart_service ;;
     enable)    enable_service ;;
     disable)   disable_service ;;
-    status)    header; if [[ "${2:-}" == "--full" ]]; then systemctl --no-pager status "${SERVICE_NAME}" || true; else show_status; fi; line ;;
+    status)
+      header
+      if [[ "${2:-}" == "--full" ]]; then systemctl --no-pager status "${SERVICE_NAME}" || true
+      else show_status; fi
+      line
+      ;;
     -h|--help|help) usage ;;
-    "")        if first_run_needed; then run_first_time_setup || true; fi; menu_loop ;;
-    *)         err "Unknown command: ${cmd}"; usage; exit 1 ;;
+    "") menu_loop ;;
+    *)  err "Unknown command: ${cmd}"; usage; exit 1 ;;
   esac
 }
 
