@@ -2,8 +2,11 @@
 set -euo pipefail
 
 # BTor - Tor manager with classic UI, first-time setup, proxy helpers,
-# Tor Browser detect/auto-install (robust system-wide scan + launcher-aware, no direct CDN downloads),
-# Tor route test, simplified menu. No custom homepage injection.
+# Tor Browser detection (launcher-aware, no direct CDN downloads),
+# Tor route test, simplified menu.
+# Behavior updates:
+# - "Status & open check.torproject.org" opens ONLY Firefox. If Firefox is missing, auto-install it, apply proxy, and open the site.
+# - After First-time setup, print a clear message: "Setup finished. Launch BTor using: btor"
 
 # -----------------------------
 # Config
@@ -13,7 +16,7 @@ BTOR_HOME="${BTOR_HOME:-$HOME/.btor}"
 BTOR_BIN_LINK="${BTOR_BIN_LINK:-/usr/local/bin/btor}"
 BTOR_RAW_URL_DEFAULT="https://raw.githubusercontent.com/linux-brat/BTor/main/btor.sh"
 BTOR_RAW_URL="${BTOR_REPO_RAW:-$BTOR_RAW_URL_DEFAULT}"
-BTOR_VERSION="${BTOR_VERSION:-1.5.0}"
+BTOR_VERSION="${BTOR_VERSION:-1.6.0}"
 
 # SOCKS settings
 BTOR_SOCKS_HOST="${BTOR_SOCKS_HOST:-127.0.0.1}"
@@ -107,7 +110,6 @@ tor_service_exists() {
 }
 tor_active() { systemctl is-active "${SERVICE_NAME}" 2>/dev/null | grep -q '^active$'; }
 
-# Prompt to start tor before actions that need it
 ensure_tor_running_with_prompt() {
   if tor_active; then return 0; fi
   if ! have_systemctl; then warn "systemctl not available; cannot control tor.service."; return 1; fi
@@ -121,10 +123,8 @@ ensure_tor_running_with_prompt() {
 }
 
 # -----------------------------
-# Tor Browser detection (no direct CDN download)
+# Tor Browser detection (launcher-aware, no direct CDN downloads)
 # -----------------------------
-# We respect installs performed by torbrowser-launcher or package managers.
-# Scan system-wide for Tor Browser start script to avoid redundant downloads.
 torbrowser_launcher_cache_candidates() {
   cat <<EOF
 $HOME/.local/share/torbrowser/tbb/x86_64/tor-browser/Browser/start-tor-browser
@@ -144,7 +144,6 @@ ${HOME}/Applications/Tor Browser/start-tor-browser
 $(torbrowser_launcher_cache_candidates)
 EOF
   {
-    # search common user and system locations, shallow to keep fast
     find "$HOME" -maxdepth 5 -type f -name 'start-tor-browser' -perm -111 2>/dev/null || true
     find /opt /usr/local /usr /var -maxdepth 5 -type f -name 'start-tor-browser' -perm -111 2>/dev/null || true
   } | sort -u
@@ -166,24 +165,18 @@ tb_launcher_pkg_name() {
     *) echo "" ;;
   esac
 }
-
-# Single-attempt guard to avoid double-install tries in one run
 __TB_LAUNCHER_TRIED="${__TB_LAUNCHER_TRIED:-0}"
-
 install_torbrowser_via_launcher_only() {
-  # Never download from CDN here. Only use launcher, else instruct user.
   local bin=""
   if bin="$(tor_browser_bin)"; then ok "Tor Browser detected at: $bin"; return 0; fi
 
-  if [ "${__TB_LAUNCHER_TRIED}" = "1" ]; then
-    warn "torbrowser-launcher already attempted in this session."
-  else
+  if [ "${__TB_LAUNCHER_TRIED}" != "1" ]; then
     local pkg; pkg="$(tb_launcher_pkg_name)"
     if [ -n "$pkg" ]; then
       info "Installing torbrowser-launcher via package manager (if available)..."
       if pm_install "$pkg"; then
         if command -v torbrowser-launcher >/dev/null 2>&1; then
-          info "Launching torbrowser-launcher (GUI). Complete the Tor Browser setup there."
+          info "Launching torbrowser-launcher (GUI). Complete Tor Browser setup there."
           nohup torbrowser-launcher >/dev/null 2>&1 || true
           sleep 3
         else
@@ -198,24 +191,10 @@ install_torbrowser_via_launcher_only() {
     __TB_LAUNCHER_TRIED="1"
   fi
 
-  # Re-scan after launcher attempt
   if bin="$(tor_browser_bin)"; then ok "Tor Browser detected at: $bin"; return 0; fi
-
-  # Provide guidance without direct downloading
-  cat <<'GUIDE'
-Tor Browser not found yet.
-- If torbrowser-launcher was installed, run it once to download Tor Browser:
-    torbrowser-launcher
-- Or install from your distribution:
-    Debian/Ubuntu: sudo apt-get install torbrowser-launcher
-    Fedora:        sudo dnf install torbrowser-launcher
-    openSUSE:      sudo zypper install torbrowser-launcher
-    Arch/Manjaro:  sudo pacman -S torbrowser-launcher
-Then re-run: btor start
-GUIDE
+  warn "Tor Browser not found yet. Run 'torbrowser-launcher' once, then re-run BTor."
   return 1
 }
-
 ensure_tor_browser() {
   local bin=""
   if bin="$(tor_browser_bin)"; then printf "%s" "$bin"; return 0; fi
@@ -228,6 +207,76 @@ ensure_tor_browser() {
   fi
   return 1
 }
+
+# -----------------------------
+# Firefox install/helper
+# -----------------------------
+install_firefox_if_missing() {
+  if command -v firefox >/dev/null 2>&1; then return 0; fi
+  info "Firefox is not installed. Installing Firefox..."
+  case "$(pm_detect)" in
+    apt)    pm_install firefox || { err "Failed to install Firefox."; return 1; } ;;
+    dnf)    pm_install firefox || { err "Failed to install Firefox."; return 1; } ;;
+    yum)    pm_install firefox || { err "Failed to install Firefox."; return 1; } ;;
+    pacman) pm_install firefox || { err "Failed to install Firefox."; return 1; } ;;
+    zypper) pm_install MozillaFirefox || pm_install firefox || { err "Failed to install Firefox."; return 1; } ;;
+    *)      err "Unknown package manager. Please install Firefox manually."; return 1 ;;
+  esac
+  ok "Firefox installed."
+  return 0
+}
+
+firefox_profiles_dirs() {
+  local base1="$HOME/.mozilla/firefox" base2="$HOME/snap/firefox/common/.mozilla/firefox"
+  if [ -d "$base1" ]; then find "$base1" -maxdepth 1 -type d -name "*.default*" 2>/dev/null; fi
+  if [ -d "$base2" ]; then find "$base2" -maxdepth 1 -type d -name "*.default*" 2>/dev/null; fi
+}
+_ff_write_userjs() {
+  local dir="${1:-}"; [ -n "$dir" ] || return 0
+  cat > "$dir/user.js" <<EOF
+// Set by BTor
+user_pref("network.proxy.type", 1);
+user_pref("network.proxy.socks", "${BTOR_SOCKS_HOST}");
+user_pref("network.proxy.socks_port", ${BTOR_SOCKS_PORT});
+user_pref("network.proxy.no_proxies_on", "localhost");
+user_pref("network.proxy.socks_remote_dns", true);
+EOF
+}
+_ff_touch_prefs() {
+  local dir="${1:-}"; [ -n "$dir" ] || return 0
+  local p="$dir/prefs.js"
+  [ -f "$p" ] || touch "$p"
+  cp -n "$p" "$dir/prefs.js.bak.$(date +%s)" 2>/dev/null || true
+  grep -v -E 'network\.proxy\.(type|socks"|socks_port|no_proxies_on|socks_remote_dns)' "$p" 2>/dev/null > "$p.tmp" || true
+  mv "$p.tmp" "$p" || true
+  cat >> "$p" <<EOF
+user_pref("network.proxy.type", 1);
+user_pref("network.proxy.socks", "${BTOR_SOCKS_HOST}");
+user_pref("network.proxy.socks_port", ${BTOR_SOCKS_PORT});
+user_pref("network.proxy.no_proxies_on", "localhost");
+user_pref("network.proxy.socks_remote_dns", true);
+EOF
+}
+firefox_set_proxy_all() {
+  local found=0 d
+  while IFS= read -r d; do
+    [ -z "${d:-}" ] && continue
+    found=1; _ff_write_userjs "$d" || true; _ff_touch_prefs "$d" || true
+  done < <(firefox_profiles_dirs || true)
+  [ "$found" -eq 0 ] && warn "No Firefox profiles found. Start Firefox once, then re-run."
+}
+
+# -----------------------------
+# GNOME proxy helpers
+# -----------------------------
+gnome_proxy_set() {
+  if ! command -v gsettings >/dev/null 2>&1; then return 1; fi
+  gsettings set org.gnome.system.proxy mode 'manual' || true
+  gsettings set org.gnome.system.proxy.socks host "${BTOR_SOCKS_HOST}" || true
+  gsettings set org.gnome.system.proxy.socks port "${BTOR_SOCKS_PORT}" || true
+  return 0
+}
+gnome_proxy_unset() { if command -v gsettings >/dev/null 2>&1; then gsettings set org.gnome.system.proxy mode 'none' || true; fi; }
 
 # -----------------------------
 # First-time setup
@@ -271,13 +320,6 @@ first_run_setup() {
       ;;
   esac
 
-  # Do NOT download Tor Browser; only detect or advise launcher
-  if tor_browser_bin >/dev/null 2>&1; then
-    ok "Tor Browser detected."
-  else
-    warn "Tor Browser not detected yet. Run 'torbrowser-launcher' once to complete setup."
-  fi
-
   # Node.js + npm (npx)
   if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
     ok "Node.js and npm are installed."
@@ -289,6 +331,7 @@ first_run_setup() {
   mkdir -p "${BTOR_HOME}" || true
   echo "done" > "${FIRST_RUN_MARKER}"
   ok "First-time setup complete."
+  printf "\n%s\n" "$(green)$(bold)Setup finished. Launch BTor using: btor$(reset)"
   line
 }
 
@@ -314,6 +357,7 @@ install_self() {
     first_run_setup
   else
     info "First-time setup already completed. Skipping."
+    printf "%s\n" "$(green)$(bold)Setup finished. Launch BTor using: btor$(reset)"
     line
   fi
 }
@@ -377,58 +421,22 @@ show_status() {
 }
 
 # -----------------------------
-# Browser Proxy helper (Brave/Chrome/Chromium/Firefox only)
+# Browser Proxy helper (Firefox primary; wrappers for Chromium/Brave optional)
 # -----------------------------
-supported_browsers_list() {
-  cat <<EOF
-brave
-brave-browser
-google-chrome-stable
-google-chrome
-chromium
-chromium-browser
-EOF
-}
-first_supported_browser() {
-  while IFS= read -r c; do
-    [ -z "${c:-}" ] && continue
-    if command -v "$c" >/dev/null 2>&1; then echo "$c"; return 0; fi
-  done <<EOF
-$(supported_browsers_list)
-EOF
-  if command -v firefox >/dev/null 2>&1; then echo "firefox"; return 0; fi
-  return 1
-}
-
-browser_wrapper_dir="${BTOR_HOME}/proxy-wrappers"
-make_wrapper_for() {
-  local app="${1:-}"; [ -n "$app" ] || return 1
-  local bin=""; bin="$(command -v "$app" 2>/dev/null || true)"; [ -z "$bin" ] && return 1
-  mkdir -p "$browser_wrapper_dir" || true
-  local wrapper="${browser_wrapper_dir}/${app}"
-  cat > "$wrapper" <<EOF
-#!/usr/bin/env bash
-exec "$bin" --proxy-server="socks5://${BTOR_SOCKS_HOST}:${BTOR_SOCKS_PORT}" --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE localhost" "\$@"
-EOF
-  chmod +x "$wrapper" || true
-  echo "$wrapper"
-}
-
 print_manual_proxy_steps() {
   cat <<'STEPS'
-Only Brave/Chrome/Chromium/Firefox are auto-supported.
-
-Manual steps for other browsers:
-- Chromium-based: launch with flags:
-    --proxy-server="socks5://127.0.0.1:9050" --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE localhost"
+Manual steps if auto-configuration is not available:
 - Firefox: Preferences > Network Settings:
     - Manual proxy configuration
     - SOCKS Host: 127.0.0.1  Port: 9050
     - Check "Proxy DNS when using SOCKS v5"
+- Chromium-based: launch with flags:
+    --proxy-server="socks5://127.0.0.1:9050" --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE localhost"
 Then visit http://check.torproject.org/
 STEPS
 }
 
+# GNOME proxy (optional system-wide)
 gnome_proxy_set() {
   if ! command -v gsettings >/dev/null 2>&1; then return 1; fi
   gsettings set org.gnome.system.proxy mode 'manual' || true
@@ -438,86 +446,24 @@ gnome_proxy_set() {
 }
 gnome_proxy_unset() { if command -v gsettings >/dev/null 2>&1; then gsettings set org.gnome.system.proxy mode 'none' || true; fi; }
 
-firefox_profiles_dirs() {
-  local base1="$HOME/.mozilla/firefox" base2="$HOME/snap/firefox/common/.mozilla/firefox"
-  if [ -d "$base1" ]; then find "$base1" -maxdepth 1 -type d -name "*.default*" 2>/dev/null; fi
-  if [ -d "$base2" ]; then find "$base2" -maxdepth 1 -type d -name "*.default*" 2>/dev/null; fi
-}
-_ff_write_userjs() {
-  local dir="${1:-}"; [ -n "$dir" ] || return 0
-  cat > "$dir/user.js" <<EOF
-// Set by BTor
-user_pref("network.proxy.type", 1);
-user_pref("network.proxy.socks", "${BTOR_SOCKS_HOST}");
-user_pref("network.proxy.socks_port", ${BTOR_SOCKS_PORT});
-user_pref("network.proxy.no_proxies_on", "localhost");
-user_pref("network.proxy.socks_remote_dns", true);
-EOF
-}
-_ff_touch_prefs() {
-  local dir="${1:-}"; [ -n "$dir" ] || return 0
-  local p="$dir/prefs.js"
-  [ -f "$p" ] || touch "$p"
-  cp -n "$p" "$dir/prefs.js.bak.$(date +%s)" 2>/dev/null || true
-  grep -v -E 'network\.proxy\.(type|socks"|socks_port|no_proxies_on|socks_remote_dns)' "$p" 2>/dev/null > "$p.tmp" || true
-  mv "$p.tmp" "$p" || true
-  cat >> "$p" <<EOF
-user_pref("network.proxy.type", 1);
-user_pref("network.proxy.socks", "${BTOR_SOCKS_HOST}");
-user_pref("network.proxy.socks_port", ${BTOR_SOCKS_PORT});
-user_pref("network.proxy.no_proxies_on", "localhost");
-user_pref("network.proxy.socks_remote_dns", true);
-EOF
-}
-firefox_set_proxy_all() {
-  local found=0 d
-  while IFS= read -r d; do
-    [ -z "${d:-}" ] && continue
-    found=1; _ff_write_userjs "$d" || true; _ff_touch_prefs "$d" || true
-  done < <(firefox_profiles_dirs || true)
-  [ "$found" -eq 0 ] && warn "No Firefox profiles found. Start Firefox once, then re-run."
-}
-
-open_check_tor_in_proxied_browser() {
-  local app=""; app="$(first_supported_browser || true)"
-  if [ -z "${app:-}" ]; then warn "No supported browser found (Brave/Chrome/Chromium/Firefox)."; print_manual_proxy_steps; return 1; fi
-  if [ "$app" = "firefox" ]; then
-    nohup firefox "http://check.torproject.org/" >/dev/null 2>&1 &
-    ok "Opened check.torproject.org in Firefox (ensure proxy prefs are applied)."
-    return 0
-  fi
-  local wrapper; wrapper="$(make_wrapper_for "$app" || true)"
-  if [ -z "${wrapper:-}" ]; then warn "Failed to create proxy wrapper for ${app}"; print_manual_proxy_steps; return 1; fi
-  nohup "$wrapper" "http://check.torproject.org/" >/dev/null 2>&1 &
-  ok "Opened check.torproject.org via ${app} with SOCKS ${BTOR_SOCKS_HOST}:${BTOR_SOCKS_PORT}"
-  return 0
-}
-
+# -----------------------------
+# Proxy workflows (Firefox-focused)
+# -----------------------------
 proxy_set_all() {
   header
   printf "%s\n" "$(bold)Setting Browser Proxy$(reset)"
   line
 
+  # Ensure Firefox present
+  install_firefox_if_missing || { err "Cannot set browser proxy without Firefox."; line; pause_once; return; }
+
   # GNOME proxy (best-effort)
   gnome_proxy_set || true
 
-  # Firefox prefs if available
-  if command -v firefox >/dev/null 2>&1; then firefox_set_proxy_all; fi
-
-  # Wrappers for supported Chromium-based browsers
-  local supported=0
-  for b in brave brave-browser google-chrome-stable google-chrome chromium chromium-browser; do
-    if command -v "$b" >/dev/null 2>&1; then
-      supported=1
-      make_wrapper_for "$b" >/dev/null || true
-    fi
-  done
+  # Firefox profiles: apply SOCKS proxy
+  firefox_set_proxy_all
 
   ok "Proxy set."
-  if [ "$supported" -eq 0 ] && ! command -v firefox >/dev/null 2>&1; then
-    warn "No supported browsers detected automatically. See manual steps:"
-    print_manual_proxy_steps
-  fi
   line
   pause_once
 }
@@ -525,9 +471,10 @@ proxy_unset_all() {
   header
   printf "%s\n" "$(bold)Removing Browser Proxy$(reset)"
   line
+
   gnome_proxy_unset || true
 
-  # Remove Firefox prefs keys
+  # Remove Firefox proxy prefs keys
   local d
   while IFS= read -r d; do
     [ -z "${d:-}" ] && continue
@@ -536,32 +483,41 @@ proxy_unset_all() {
     if [ -f "$p" ]; then grep -v -E 'network\.proxy\.(type|socks"|socks_port|no_proxies_on|socks_remote_dns)' "$p" 2>/dev/null > "$p.tmp" || true; mv "$p.tmp" "$p" || true; fi
   done < <(firefox_profiles_dirs || true)
 
-  # Remove wrappers
-  rm -rf "$browser_wrapper_dir" 2>/dev/null || true
-
   ok "Proxy removed."
   line
   pause_once
 }
 proxy_status() {
   header
-  printf "%s\n" "$(bold)Proxy Status & Test$(reset)"
+  printf "%s\n" "$(bold)Proxy Status & Test (Firefox)$(reset)"
   line
   printf "Target SOCKS: %s:%s\n\n" "${BTOR_SOCKS_HOST}" "${BTOR_SOCKS_PORT}"
 
+  # Ask to start tor
   ensure_tor_running_with_prompt || true
-  open_check_tor_in_proxied_browser || warn "Could not auto-open a supported proxied browser."
+
+  # Ensure Firefox present then open test page
+  if install_firefox_if_missing; then
+    # Make sure Firefox has proxy applied before opening
+    firefox_set_proxy_all
+    nohup firefox "http://check.torproject.org/" >/dev/null 2>&1 &
+    ok "Opened check.torproject.org in Firefox with proxy."
+  else
+    err "Firefox could not be installed automatically."
+    print_manual_proxy_steps
+  fi
   line
   pause_once
 }
 
 # -----------------------------
-# Tor Route Test (asks to start tor first)
+# Tor Route Test
 # -----------------------------
 route_test() {
   header
   printf "%s\n" "$(bold)Tor Route Test$(reset)"
   line
+
   ensure_tor_running_with_prompt || true
   if ! command -v curl >/dev/null 2>&1; then warn "curl not found. Install curl to run the test."; line; return; fi
 
@@ -575,9 +531,7 @@ route_test() {
   else
     err "Not using Tor. Fix tips:"
     printf " - Ensure Tor is active (Start tor.service).\n"
-    printf " - Ensure browser uses SOCKS %s:%s (or 9150 for Tor Browser).\n" "${BTOR_SOCKS_HOST}" "${BTOR_SOCKS_PORT}"
-    printf " - Firefox: fully close before applying proxy; then restart.\n"
-    printf " - Chromium/Brave: launch using wrapper from %s.\n" "${browser_wrapper_dir}"
+    printf " - Ensure Firefox proxy is applied (we set it automatically in Proxy status).\n"
   fi
   line
   pause_once
@@ -589,12 +543,12 @@ route_test() {
 menu_browser_proxy() {
   while true; do
     header
-    printf "%s\n" "$(bold)Browser Proxy$(reset)"
+    printf "%s\n" "$(bold)Browser Proxy (Firefox)$(reset)"
     line
     printf "SOCKS %s:%s\n\n" "${BTOR_SOCKS_HOST}" "${BTOR_SOCKS_PORT}"
-    printf "1) Set proxy (GNOME + Firefox + wrappers for Brave/Chrome/Chromium)\n"
+    printf "1) Set proxy (Firefox + GNOME)\n"
     printf "2) Remove proxy\n"
-    printf "3) Status & open check.torproject.org\n"
+    printf "3) Status & open check.torproject.org (Firefox)\n"
     printf "4) Back\n\n"
     local choice; choice="$(read_tty 'Select an option [1-4]: ')"
     case "$choice" in
