@@ -3,7 +3,8 @@ set -euo pipefail
 
 # BTor - Tor manager with classic UI, first-time setup, proxy helpers,
 # Tor Browser detect/auto-install with launcher fallback, Tor route test,
-# BridgeDB (bridges) management, and Nyx (tor monitor) support.
+# BridgeDB (bridges) management, Nyx (tor monitor) support,
+# and BTor custom homepage injection for Tor Browser.
 
 # -----------------------------
 # Config
@@ -13,7 +14,7 @@ BTOR_HOME="${BTOR_HOME:-$HOME/.btor}"
 BTOR_BIN_LINK="${BTOR_BIN_LINK:-/usr/local/bin/btor}"
 BTOR_RAW_URL_DEFAULT="https://raw.githubusercontent.com/linux-brat/BTor/main/btor.sh"
 BTOR_RAW_URL="${BTOR_REPO_RAW:-$BTOR_RAW_URL_DEFAULT}"
-BTOR_VERSION="${BTOR_VERSION:-1.0.0}"
+BTOR_VERSION="${BTOR_VERSION:-1.1.0}"
 
 # Tor Browser locations
 TOR_BROWSER_DIR_DEFAULT="$HOME/.local/tor-browser"
@@ -34,6 +35,11 @@ TORRC_PATH="${BTOR_TORRC_PATH:-$TORRC_PATH_DEFAULT}"
 TORRC_D_DIR="/etc/tor/torrc.d"
 BRIDGES_DROPIN="${TORRC_D_DIR}/bridges.conf"   # preferred if Include is supported
 USE_TORRC_DROPIN=1                              # 1=write to bridges.conf if possible else fallback to torrc
+
+# BTor custom homepage injection for Tor Browser
+BTOR_SRC_DIR_DEFAULT="$HOME/src"
+BTOR_SRC_DIR="${BTOR_SRC_DIR:-$BTOR_SRC_DIR_DEFAULT}"   # directory containing btor_home.html
+BTOR_HOME_HTML="${BTOR_HOME_HTML:-${BTOR_SRC_DIR}/btor_home.html}"
 
 # -----------------------------
 # UI Helpers (classic)
@@ -190,12 +196,10 @@ install_torbrowser_launcher_or_fallback() {
   fi
 
   local pkg; pkg="$(tb_launcher_pkg_name)"
-  local launcher=0
   if [ -n "$pkg" ]; then
     info "Attempting to install ${pkg}..."
     if pm_install "$pkg"; then
       if command -v torbrowser-launcher >/dev/null 2>&1; then
-        launcher=1
         info "Launching torbrowser-launcher (GUI) to fetch Tor Browser..."
         nohup torbrowser-launcher >/dev/null 2>&1 || true
         sleep 2
@@ -240,6 +244,63 @@ ensure_tor_browser() {
 }
 
 # -----------------------------
+# Tor Browser custom homepage injection
+# -----------------------------
+# We set Tor Browser's start page to a local BTor HTML file, if present at $BTOR_HOME_HTML.
+# For Tor Browser (Firefox-based), we write prefs in the Tor Browser profile defaults.
+tor_browser_set_custom_homepage() {
+  # Ensure source exists
+  if [ ! -f "$BTOR_HOME_HTML" ]; then
+    warn "BTor homepage HTML not found at ${BTOR_HOME_HTML}; skipping homepage injection."
+    return 0
+  fi
+
+  # Find Tor Browser Browser directory
+  local tb_base=""
+  if [ -d "${TOR_BROWSER_DIR}/tor-browser/Browser" ]; then
+    tb_base="${TOR_BROWSER_DIR}/tor-browser/Browser"
+  else
+    # Try other common locations
+    local cand=""
+    cand="$(dirname "$(dirname "$(tor_browser_bin 2>/dev/null || echo)")" 2>/dev/null || true)"
+    if [ -d "$cand" ]; then tb_base="$cand"; fi
+  fi
+
+  if [ -z "$tb_base" ] || [ ! -d "$tb_base" ]; then
+    warn "Could not locate Tor Browser 'Browser' directory; skipping homepage injection."
+    return 0
+  fi
+
+  # Place custom HTML into Browser/btor_home.html
+  local dest_html="${tb_base}/btor_home.html"
+  cp -f "$BTOR_HOME_HTML" "$dest_html" || { warn "Failed to copy homepage HTML to Tor Browser dir."; return 0; }
+
+  # Prefer Defaults/preferences (applies to new profiles)
+  local defaults_pref_dir="${tb_base}/TorBrowser/Data/Browser/profile.default/preferences"
+  local defaults_pref_dir_alt="${tb_base}/defaults/preferences"
+  local pref_target=""
+  if [ -d "$defaults_pref_dir" ]; then
+    pref_target="${defaults_pref_dir}/btor-homepage.js"
+  elif [ -d "$defaults_pref_dir_alt" ]; then
+    pref_target="${defaults_pref_dir_alt}/btor-homepage.js"
+  else
+    # Fallback: create preferences dir under defaults
+    mkdir -p "$defaults_pref_dir_alt" 2>/dev/null || true
+    pref_target="${defaults_pref_dir_alt}/btor-homepage.js"
+  fi
+
+  # Set the homepage to the local file
+  {
+    echo '// Set by BTor - custom homepage'
+    echo "pref(\"browser.startup.homepage\", \"file://${dest_html}\");"
+    echo "pref(\"startup.homepage_welcome_url\", \"file://${dest_html}\");"
+    echo "pref(\"startup.homepage_welcome_url.additional\", \"file://${dest_html}\");"
+  } > "$pref_target" || true
+
+  ok "Tor Browser homepage set to ${dest_html}"
+}
+
+# -----------------------------
 # First-time setup (runs during install only once)
 # Also checks: tor, Tor Browser (with launcher fallback), Node/npm/npx, Nyx
 # -----------------------------
@@ -247,10 +308,7 @@ first_run_needed() { [ ! -f "${FIRST_RUN_MARKER}" ]; }
 
 install_nyx() {
   case "$(pm_detect)" in
-    apt) pm_install nyx ;;
-    dnf|yum) pm_install nyx ;;
-    pacman) pm_install nyx ;;
-    zypper) pm_install nyx ;;
+    apt|dnf|yum|pacman|zypper) pm_install nyx ;;
     *) warn "Unknown package manager; install Nyx (nyx) manually if needed." ;;
   esac
 }
@@ -289,6 +347,11 @@ first_run_setup() {
     else
       warn "Tor Browser install may have failed. You can retry from the menu."
     fi
+  fi
+
+  # 2.1) Inject BTor custom homepage if Tor Browser exists
+  if tb_bin="$(tor_browser_bin)"; then
+    tor_browser_set_custom_homepage
   fi
 
   # 3) Node.js + npm (npx)
@@ -373,6 +436,8 @@ start_service() {
     ok "Started ${SERVICE_NAME}."
     if confirm "Open Tor Browser now? [y/N]: "; then
       local bin=""; if bin="$(ensure_tor_browser)"; then
+        # Ensure homepage injected (re-apply in case TB was installed later)
+        tor_browser_set_custom_homepage
         nohup "$bin" >/dev/null 2>&1 & ok "Tor Browser launched."
       else
         warn "Tor Browser not available."
