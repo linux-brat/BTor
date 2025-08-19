@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# BTor - Tor manager with classic UI, reliable proxy setup, Tor Browser detect/auto-install, and Tor route test
+# BTor - Tor manager with classic UI, first-time setup, proxy helpers, Tor Browser detect/auto-install, and Tor route test
 
 # -----------------------------
 # Config
@@ -11,7 +11,7 @@ BTOR_HOME="${BTOR_HOME:-$HOME/.btor}"
 BTOR_BIN_LINK="${BTOR_BIN_LINK:-/usr/local/bin/btor}"
 BTOR_RAW_URL_DEFAULT="https://raw.githubusercontent.com/linux-brat/BTor/main/btor.sh"
 BTOR_RAW_URL="${BTOR_REPO_RAW:-$BTOR_RAW_URL_DEFAULT}"
-BTOR_VERSION="${BTOR_VERSION:-0.7.0}"
+BTOR_VERSION="${BTOR_VERSION:-0.8.0}"
 
 # Tor Browser locations
 TOR_BROWSER_DIR_DEFAULT="$HOME/.local/tor-browser"
@@ -23,8 +23,11 @@ BTOR_SOCKS_HOST="${BTOR_SOCKS_HOST:-127.0.0.1}"
 BTOR_SOCKS_PORT="${BTOR_SOCKS_PORT:-9050}"
 BTOR_SOCKS_PORT_ALT="${BTOR_SOCKS_PORT_ALT:-9150}"  # Tor Browser default
 
+# First-run marker
+FIRST_RUN_MARKER="${BTOR_HOME}/.first_run_done"
+
 # -----------------------------
-# UI Helpers (classic left-aligned)
+# UI Helpers (classic)
 # -----------------------------
 bold() { tput bold 2>/dev/null || true; }
 reset() { tput sgr0 2>/dev/null || true; }
@@ -110,30 +113,6 @@ tor_service_exists() {
 }
 tor_active() { systemctl is-active "${SERVICE_NAME}" 2>/dev/null | grep -q '^active$'; }
 
-install_or_update_tor() {
-  header
-  printf "%s\n" "$(bold)Check Tor$(reset)"
-  line
-  if tor_cli_installed; then ok "Tor CLI found: $(command -v tor)"; else warn "Tor CLI not found."; fi
-  if tor_service_exists; then ok "Tor unit found: ${SERVICE_NAME}"; else warn "Tor unit ${SERVICE_NAME} not found."; fi
-  if tor_cli_installed && tor_service_exists; then
-    if confirm "Tor installed. Check for updates via package manager? [y/N]: "; then
-      case "$(pm_detect)" in
-        apt|dnf|yum|pacman|zypper) pm_install tor ;;
-        *) warn "Unknown package manager. Skipping update." ;;
-      esac
-    fi
-  else
-    if confirm "Tor missing/incomplete. Install Tor now? [y/N]: "; then
-      case "$(pm_detect)" in
-        apt|dnf|yum|pacman|zypper) pm_install tor ;;
-        *) warn "Unsupported package manager. Install Tor manually." ;;
-      esac
-    fi
-  fi
-  line
-}
-
 # -----------------------------
 # Tor Browser detect / install
 # -----------------------------
@@ -156,7 +135,6 @@ tor_browser_bin() {
   done <<EOF
 $(tor_browser_candidates)
 EOF
-  # search under TOR_BROWSER_DIR
   if [ -d "$TOR_BROWSER_DIR" ]; then
     local cand=""; cand="$(find "$TOR_BROWSER_DIR" -type f -name start-tor-browser -perm -111 2>/dev/null | head -n1 || true)"
     [ -n "$cand" ] && { printf "%s" "$cand"; return 0; }
@@ -197,6 +175,54 @@ ensure_tor_browser() {
 }
 
 # -----------------------------
+# First-time setup (runs during install only once)
+# -----------------------------
+first_run_needed() { [ ! -f "${FIRST_RUN_MARKER}" ]; }
+
+first_run_setup() {
+  header
+  printf "%s\n" "$(bold)First-time setup$(reset)"
+  line
+
+  # 1) Tor
+  if tor_cli_installed && tor_service_exists; then
+    ok "Tor is already installed."
+  else
+    info "Installing Tor..."
+    case "$(pm_detect)" in
+      apt|dnf|yum|pacman|zypper) pm_install tor ;;
+      *) warn "Unsupported package manager. Please install Tor manually." ;;
+    esac
+  fi
+
+  # 2) Tor Browser
+  local tb_bin=""
+  if tb_bin="$(tor_browser_bin)"; then
+    ok "Tor Browser found."
+  else
+    info "Installing Tor Browser..."
+    download_tor_browser
+    if tb_bin="$(tor_browser_bin)"; then ok "Tor Browser installed."; else warn "Tor Browser install may have failed."; fi
+  fi
+
+  # 3) Node.js + npm (npx via npm)
+  if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+    ok "Node.js and npm are installed."
+  else
+    info "Installing Node.js and npm (for npx)..."
+    case "$(pm_detect)" in
+      apt|dnf|yum|pacman|zypper) pm_install nodejs npm ;;
+      *) warn "Unsupported package manager. Please install Node.js/npm manually." ;;
+    esac
+  fi
+
+  mkdir -p "${BTOR_HOME}" || true
+  echo "done" > "${FIRST_RUN_MARKER}"
+  ok "First-time setup complete."
+  line
+}
+
+# -----------------------------
 # Install / Update / Uninstall BTor
 # -----------------------------
 install_self() {
@@ -213,7 +239,16 @@ install_self() {
   need_sudo; sudo ln -sf "${BTOR_HOME}/btor" "${BTOR_BIN_LINK}" || true
   ok "Installed. Use: btor"
   line
+
+  # Run first-time setup once
+  if first_run_needed; then
+    first_run_setup
+  else
+    info "First-time setup already completed. Skipping."
+    line
+  fi
 }
+
 uninstall_self() {
   header
   printf "%s\n" "$(bold)Uninstalling BTor$(reset)"
@@ -274,7 +309,7 @@ show_status() {
 }
 
 # -----------------------------
-# Browser Proxy helper (GNOME + Firefox + Chromium wrappers)
+# Browser Proxy helper
 # -----------------------------
 gnome_proxy_set() {
   if ! command -v gsettings >/dev/null 2>&1; then warn "gsettings not found (GNOME proxy not available)."; return 1; fi
@@ -283,19 +318,13 @@ gnome_proxy_set() {
   gsettings set org.gnome.system.proxy.socks port "${BTOR_SOCKS_PORT}" || true
   ok "GNOME SOCKS proxy set to ${BTOR_SOCKS_HOST}:${BTOR_SOCKS_PORT}"
 }
-gnome_proxy_unset() {
-  if command -v gsettings >/dev/null 2>&1; then
-    gsettings set org.gnome.system.proxy mode 'none' || true
-    ok "GNOME proxy disabled"
-  fi
-}
+gnome_proxy_unset() { if command -v gsettings >/dev/null 2>&1; then gsettings set org.gnome.system.proxy mode 'none' || true; ok "GNOME proxy disabled"; fi; }
 
 firefox_profiles_dirs() {
   local base1="$HOME/.mozilla/firefox" base2="$HOME/snap/firefox/common/.mozilla/firefox"
   if [ -d "$base1" ]; then find "$base1" -maxdepth 1 -type d -name "*.default*" 2>/dev/null; fi
   if [ -d "$base2" ]; then find "$base2" -maxdepth 1 -type d -name "*.default*" 2>/dev/null; fi
 }
-
 _ff_write_userjs() {
   local dir="${1:-}"; [ -n "$dir" ] || return 0
   cat > "$dir/user.js" <<EOF
@@ -322,7 +351,6 @@ user_pref("network.proxy.no_proxies_on", "localhost");
 user_pref("network.proxy.socks_remote_dns", true);
 EOF
 }
-
 firefox_set_proxy_all() {
   local found=0 d
   while IFS= read -r d; do
