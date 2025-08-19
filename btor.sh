@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# BTor single-file installer + manager
+# BTor single-file installer + manager with first-run setup
 # File: btor.sh
 # Requirements: bash, curl, systemd (systemctl), sudo for service actions.
 
@@ -13,7 +13,11 @@ BTOR_HOME="${BTOR_HOME:-$HOME/.btor}"
 BTOR_BIN_LINK="${BTOR_BIN_LINK:-/usr/local/bin/btor}"
 BTOR_RAW_URL_DEFAULT="https://raw.githubusercontent.com/linux-brat/BTor/main/btor.sh"
 BTOR_RAW_URL="${BTOR_REPO_RAW:-$BTOR_RAW_URL_DEFAULT}"
-BTOR_VERSION="${BTOR_VERSION:-0.1.2}"
+BTOR_VERSION="${BTOR_VERSION:-0.2.0}"
+
+# Tor Browser defaults
+TOR_BROWSER_DIR_DEFAULT="$HOME/.local/tor-browser"
+TOR_BROWSER_DIR="${BTOR_TOR_BROWSER_DIR:-$TOR_BROWSER_DIR_DEFAULT}"
 
 # -----------------------------
 # UI helpers
@@ -37,7 +41,6 @@ have_dev_tty() { [[ -r /dev/tty ]]; }
 
 # Read from interactive TTY even if stdin is a pipe
 tty_read() {
-  # Usage: var="$(tty_read 'Prompt: ')"
   local prompt="$1"
   if is_stdin_tty; then
     read -rp "$prompt" __choice || true
@@ -45,16 +48,21 @@ tty_read() {
     return
   fi
   if have_dev_tty; then
-    # open /dev/tty on fd 3 for reading
     printf "%s" "$prompt" >&2
     local line=""
     IFS= read -r line < /dev/tty || true
     echo "${line:-}"
     return
   fi
-  # No usable TTY: fail with message so the user understands
-  err "No interactive TTY available. Try running: bash btor.sh or install first: curl -fsSL ${BTOR_RAW_URL} -o btor.sh && bash btor.sh install && btor"
+  err "No interactive TTY available. Try: bash btor.sh, or install then run: curl -fsSL ${BTOR_RAW_URL} -o btor.sh && bash btor.sh install && btor"
   exit 1
+}
+
+confirm() {
+  local prompt="${1:-Proceed? [y/N]: }"
+  local ans
+  ans="$(tty_read "$prompt")"
+  [[ "${ans,,}" == "y" || "${ans,,}" == "yes" ]]
 }
 
 press_enter() {
@@ -64,13 +72,242 @@ press_enter() {
 }
 
 # -----------------------------
+# OS / Package manager detection
+# -----------------------------
+pm_detect() {
+  if command -v apt-get >/dev/null 2>&1; then echo "apt"; return; fi
+  if command -v dnf >/dev/null 2>&1; then echo "dnf"; return; fi
+  if command -v yum >/dev/null 2>&1; then echo "yum"; return; fi
+  if command -v pacman >/dev/null 2>&1; then echo "pacman"; return; fi
+  if command -v zypper >/dev/null 2>&1; then echo "zypper"; return; fi
+  echo "unknown"
+}
+
+pm_install() {
+  local pkgs=("$@")
+  local pm; pm="$(pm_detect)"
+  need_sudo
+  case "$pm" in
+    apt)
+      sudo apt-get update -y
+      sudo apt-get install -y "${pkgs[@]}"
+      ;;
+    dnf)
+      sudo dnf install -y "${pkgs[@]}"
+      ;;
+    yum)
+      sudo yum install -y "${pkgs[@]}"
+      ;;
+    pacman)
+      sudo pacman -Sy --noconfirm "${pkgs[@]}"
+      ;;
+    zypper)
+      sudo zypper install -y "${pkgs[@]}"
+      ;;
+    *)
+      err "Unsupported package manager. Please install: ${pkgs[*]}"
+      return 1
+      ;;
+  esac
+}
+
+# -----------------------------
+# Tor CLI / service checks
+# -----------------------------
+tor_cli_installed() { command -v tor >/dev/null 2>&1; }
+tor_service_exists() { systemctl list-unit-files | grep -q "^${SERVICE_NAME}\b" || systemctl status "${SERVICE_NAME}" >/dev/null 2>&1; }
+
+install_or_update_tor() {
+  info "Checking Tor installation..."
+  if tor_cli_installed; then
+    ok "Tor CLI found: $(command -v tor)"
+  else
+    warn "Tor CLI not found."
+  fi
+
+  if tor_service_exists; then
+    ok "Tor service unit found: ${SERVICE_NAME}"
+  else
+    warn "Tor systemd unit ${SERVICE_NAME} not found."
+  fi
+
+  if tor_cli_installed && tor_service_exists; then
+    # Try to update Tor via package manager
+    if confirm "Tor seems installed. Check for updates via package manager? [y/N]: "; then
+      case "$(pm_detect)" in
+        apt) need_sudo; sudo apt-get update -y && sudo apt-get install -y tor ;;
+        dnf) pm_install tor ;;
+        yum) pm_install tor ;;
+        pacman) pm_install tor ;;
+        zypper) pm_install tor ;;
+        *) warn "Unknown package manager. Skipping Tor update." ;;
+      esac
+    fi
+    return 0
+  fi
+
+  # Offer install
+  if confirm "Tor is missing or incomplete. Install Tor now? [y/N]: "; then
+    case "$(pm_detect)" in
+      apt) pm_install tor ;;
+      dnf|yum) pm_install tor ;;
+      pacman) pm_install tor ;;
+      zypper) pm_install tor ;;
+      *)
+        err "Unsupported package manager. Please install Tor manually."
+        return 1
+        ;;
+    esac
+    ok "Tor installed."
+  else
+    warn "Skipping Tor installation."
+    return 1
+  fi
+}
+
+# -----------------------------
+# Tor Browser checks
+# -----------------------------
+tor_browser_bin() {
+  # Typical Tor Browser launcher inside extracted dir; try to find it.
+  # Official tarball structure: tor-browser/Browser/start-tor-browser
+  if [[ -x "${TOR_BROWSER_DIR}/tor-browser/Browser/start-tor-browser" ]]; then
+    echo "${TOR_BROWSER_DIR}/tor-browser/Browser/start-tor-browser"
+    return
+  fi
+  # Alternative location if user extracted elsewhere under the dir
+  local cand
+  cand="$(find "${TOR_BROWSER_DIR}" -type f -name start-tor-browser -perm -111 2>/dev/null | head -n1 || true)"
+  if [[ -n "$cand" ]]; then
+    echo "$cand"
+    return
+  fi
+  echo ""
+}
+
+tor_browser_installed() {
+  [[ -n "$(tor_browser_bin)" ]]
+}
+
+download_tor_browser() {
+  # Try to choose an x86_64 English build by default.
+  # Users can change later; we keep it simple and robust.
+  local url="https://www.torproject.org/dist/torbrowser/13.5.2/tor-browser-linux64-13.5.2_ALL.tar.xz"
+  # If that version becomes unavailable later, users can replace URL via BTOR_TB_URL env.
+  url="${BTOR_TB_URL:-$url}"
+
+  mkdir -p "${TOR_BROWSER_DIR}"
+  info "Downloading Tor Browser to ${TOR_BROWSER_DIR}..."
+  curl -fL --progress-bar "$url" -o "${TOR_BROWSER_DIR}/tor-browser.tar.xz"
+  info "Extracting..."
+  tar -xf "${TOR_BROWSER_DIR}/tor-browser.tar.xz" -C "${TOR_BROWSER_DIR}"
+  rm -f "${TOR_BROWSER_DIR}/tor-browser.tar.xz"
+  ok "Tor Browser downloaded."
+}
+
+install_or_update_tor_browser() {
+  info "Checking Tor Browser..."
+  local bin
+  bin="$(tor_browser_bin)"
+  if [[ -n "$bin" ]]; then
+    ok "Tor Browser found: $bin"
+    # We don't attempt auto-updater; Tor Browser has its own internal updater.
+    if confirm "Launch Tor Browser updater (open GUI) now? [y/N]: "; then
+      nohup "$bin" >/dev/null 2>&1 &
+      info "Launched Tor Browser. Use its internal updater. Return to BTor when done."
+    fi
+    return 0
+  fi
+
+  warn "Tor Browser not found under ${TOR_BROWSER_DIR}."
+  if confirm "Download Tor Browser now? [y/N]: "; then
+    download_tor_browser
+    bin="$(tor_browser_bin || true)"
+    if [[ -n "$bin" ]]; then
+      ok "Tor Browser ready: $bin"
+    else
+      warn "Tor Browser install could not be validated; please check ${TOR_BROWSER_DIR}."
+    fi
+  else
+    warn "Skipping Tor Browser."
+    return 1
+  fi
+}
+
+# -----------------------------
+# Node.js/npm/npx checks
+# -----------------------------
+npx_installed() { command -v npx >/dev/null 2>&1; }
+npm_installed() { command -v npm >/dev/null 2>&1; }
+node_installed() { command -v node >/dev/null 2>&1; }
+
+install_or_update_node_stack() {
+  info "Checking Node.js/npm/npx..."
+  if node_installed && npm_installed && npx_installed; then
+    ok "Node/npm/npx are installed."
+    if confirm "Check for Node/npm updates via package manager? [y/N]: "; then
+      case "$(pm_detect)" in
+        apt) need_sudo; sudo apt-get update -y && sudo apt-get install -y nodejs npm ;;
+        dnf|yum) pm_install nodejs npm ;;
+        pacman) pm_install nodejs npm ;;
+        zypper) pm_install nodejs npm ;;
+        *) warn "Unsupported package manager. Skipping Node update." ;;
+      esac
+    fi
+    return 0
+  fi
+
+  warn "Node/npm/npx not fully available."
+  if confirm "Install Node.js and npm now? [y/N]: "; then
+    case "$(pm_detect)" in
+      apt) pm_install nodejs npm ;;
+      dnf|yum) pm_install nodejs npm ;;
+      pacman) pm_install nodejs npm ;;
+      zypper) pm_install nodejs npm ;;
+      *)
+        err "Unsupported package manager. Please install Node.js/npm manually."
+        return 1
+        ;;
+    esac
+    if ! npx_installed && npm_installed; then
+      ok "npx will be available via npm (same package)."
+    fi
+  else
+    warn "Skipping Node.js/npm installation."
+    return 1
+  fi
+}
+
+# -----------------------------
+# First-run gate
+# -----------------------------
+first_run_marker() { echo "${BTOR_HOME}/.first_run_done"; }
+first_run_needed() { [[ ! -f "$(first_run_marker)" ]]; }
+
+run_first_time_setup() {
+  info "First-time setup starting..."
+  mkdir -p "${BTOR_HOME}"
+
+  # 1) Tor
+  install_or_update_tor || true
+
+  # 2) Tor Browser
+  install_or_update_tor_browser || true
+
+  # 3) Node/npm/npx
+  install_or_update_node_stack || true
+
+  touch "$(first_run_marker)"
+  ok "First-time setup complete."
+}
+
+# -----------------------------
 # Install / Uninstall / Update
 # -----------------------------
 install_self() {
   info "Installing BTor to ${BTOR_HOME}..."
   mkdir -p "${BTOR_HOME}"
 
-  # If executed from a file, copy it; if piped, fetch from URL
   if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE}" ]]; then
     cp "${BASH_SOURCE}" "${BTOR_HOME}/btor"
   else
@@ -206,6 +443,8 @@ Env:
   BTOR_HOME                      Install dir (default: \$HOME/.btor)
   BTOR_BIN_LINK                  Symlink path (default: /usr/local/bin/btor)
   BTOR_REPO_RAW                  URL to fetch btor.sh for update/install
+  BTOR_TOR_BROWSER_DIR           Tor Browser install/check directory (default: \$HOME/.local/tor-browser)
+  BTOR_TB_URL                    Override Tor Browser tarball URL (advanced)
 EOF
 }
 
@@ -219,6 +458,8 @@ cli() {
       exec btor
     else
       warn "No /dev/tty detected; running menu without installing."
+      # On first run in such env, still attempt setup best-effort:
+      if first_run_needed; then run_first_time_setup || true; fi
       menu_loop
       exit 0
     fi
@@ -238,9 +479,16 @@ cli() {
       if [[ "${2:-}" == "--full" ]]; then show_status full; else show_status concise; fi
       ;;
     -h|--help|help) usage ;;
-    "") menu_loop ;;
-    *)  err "Unknown command: ${cmd}"; usage; exit 1 ;;
+    "")
+      if first_run_needed; then run_first_time_setup || true; fi
+      menu_loop
+      ;;
+    *)
+      err "Unknown command: ${cmd}"
+      usage
+      exit 1
+      ;;
   esac
 }
 
-cli "${@}"
+cli "$@"
