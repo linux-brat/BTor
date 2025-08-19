@@ -1,13 +1,22 @@
 # 🧅 BTor – Tor Service & Browser Manager
 
-**BTor** is a single-file installer + manager for **Tor service** and **Tor Browser**, designed to simplify setup and management on Linux systems.
 
-It automatically:
+<p align="center">
+<img src="BTor.png" alt="BTor Logo" width="280"/>
+</p>
 
-* Installs and manages **Tor CLI & systemd service**
-* Downloads and configures **Tor Browser**
-* Ensures **Node.js/npm/npx** are available (for related tooling)
-* Provides an **interactive menu** for managing Tor service
+
+<p align="center">
+<b>Simple CLI + Manager for Tor Service & Tor Browser on Linux</b>
+</p>
+
+
+<p align="center">
+<a href="https://github.com/linux-brat/BTor/stargazers"><img src="https://img.shields.io/github/stars/linux-brat/BTor?color=purple&style=for-the-badge"></a>
+<a href="https://github.com/linux-brat/BTor/issues"><img src="https://img.shields.io/github/issues/linux-brat/BTor?style=for-the-badge"></a>
+<a href="https://github.com/linux-brat/BTor/network/members"><img src="https://img.shields.io/github/forks/linux-brat/BTor?style=for-the-badge"></a>
+<a href="https://github.com/linux-brat/BTor"><img src="https://img.shields.io/github/license/linux-brat/BTor?style=for-the-badge"></a>
+</p>
 
 ---
 
