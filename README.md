@@ -173,4 +173,4 @@ btor uninstall
 
 ## 📜 License
 
-MIT License © 2025 [linux-brat](https://github.com/linux-brat)
+MIT License © 2025 [linux-brat](LICENSE)
