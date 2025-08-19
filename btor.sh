@@ -148,7 +148,7 @@ install_or_update_tor() {
       case "$(pm_detect)" in
         apt) need_sudo; sudo apt-get update -y || true; sudo apt-get install -y tor || true;;
         dnf|yum|pacman|zypper) pm_install tor || true;;
-        *) warn "Unknown package manager. Skipping."; ;
+        *) warn "Unknown package manager. Skipping.";
       esac
     fi
   else
