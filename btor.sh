@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# BTor single-file installer + manager with first-run setup
+# BTor single-file installer + manager with first-run setup and fancy UI
 # File: btor.sh
 # Requirements: bash, curl, systemd (systemctl), sudo for service actions.
 
@@ -13,11 +13,15 @@ BTOR_HOME="${BTOR_HOME:-$HOME/.btor}"
 BTOR_BIN_LINK="${BTOR_BIN_LINK:-/usr/local/bin/btor}"
 BTOR_RAW_URL_DEFAULT="https://raw.githubusercontent.com/linux-brat/BTor/main/btor.sh"
 BTOR_RAW_URL="${BTOR_REPO_RAW:-$BTOR_RAW_URL_DEFAULT}"
-BTOR_VERSION="${BTOR_VERSION:-0.2.0}"
+BTOR_VERSION="${BTOR_VERSION:-0.3.0}"
 
 # Tor Browser defaults
 TOR_BROWSER_DIR_DEFAULT="$HOME/.local/tor-browser"
 TOR_BROWSER_DIR="${BTOR_TOR_BROWSER_DIR:-$TOR_BROWSER_DIR_DEFAULT}"
+
+# UI timing
+BTOR_SPLASH_SPEED="${BTOR_SPLASH_SPEED:-0.01}"   # seconds per char for typing effect
+BTOR_SPLASH_PAUSE="${BTOR_SPLASH_PAUSE:-0.3}"    # seconds between lines
 
 # -----------------------------
 # UI helpers
@@ -28,6 +32,8 @@ green() { tput setaf 2 2>/dev/null || true; }
 red() { tput setaf 1 2>/dev/null || true; }
 yellow() { tput setaf 3 2>/dev/null || true; }
 blue() { tput setaf 4 2>/dev/null || true; }
+magenta() { tput setaf 5 2>/dev/null || true; }
+cyan() { tput setaf 6 2>/dev/null || true; }
 
 info() { echo "$(blue)$(bold)[i]$(reset) $*"; }
 ok() { echo "$(green)$(bold)[ok]$(reset) $*"; }
@@ -69,6 +75,70 @@ press_enter() {
   if is_stdin_tty || have_dev_tty; then
     tty_read "Press Enter to continue..."
   fi
+}
+
+line() { printf "%s\n" "──────────────────────────────────────────────────────────────────────────────"; }
+
+# -----------------------------
+# ASCII UI
+# -----------------------------
+ascii_btor() {
+  # Clean monospace ASCII (no external fonts)
+  cat <<'BTOR_ASCII'
+   ____  _______
+  | __ )|_   _|_ __   ___   ___
+  |  _ \  | | | '_ \ / _ \ / _ \
+  | |_) | | | | | | | (_) | (_) |
+  |____/  |_| |_| |_|\___/ \___/
+
+                 B T o r
+BTOR_ASCII
+}
+
+ascii_subtitle() {
+  printf "%s\n" "$(magenta)$(bold)Tor service manager · v${BTOR_VERSION}$(reset)"
+}
+
+type_line() {
+  # typing effect for a single line
+  local s="$1"
+  local i ch
+  for ((i=0; i<${#s}; i++)); do
+    ch="${s:$i:1}"
+    printf "%s" "$ch"
+    sleep "${BTOR_SPLASH_SPEED}"
+  done
+  printf "\n"
+  sleep "${BTOR_SPLASH_PAUSE}"
+}
+
+splash() {
+  clear 2>/dev/null || true
+  local lines=(
+"   ____  _______"
+"  | __ )|_   _|_ __   ___   ___"
+"  |  _ \  | | | '_ \ / _ \ / _ \\"
+"  | |_) | | | | | | | (_) | (_) |"
+"  |____/  |_| |_| |_|\___/ \___/"
+""
+"                 B T o r"
+""
+  )
+  local l
+  printf "%s" "$(cyan)"
+  for l in "${lines[@]}"; do
+    type_line "$l"
+  done
+  printf "%s" "$(reset)"
+  ascii_subtitle
+  line
+}
+
+header() {
+  clear 2>/dev/null || true
+  ascii_btor
+  ascii_subtitle
+  line
 }
 
 # -----------------------------
@@ -132,31 +202,20 @@ install_or_update_tor() {
   fi
 
   if tor_cli_installed && tor_service_exists; then
-    # Try to update Tor via package manager
     if confirm "Tor seems installed. Check for updates via package manager? [y/N]: "; then
       case "$(pm_detect)" in
         apt) need_sudo; sudo apt-get update -y && sudo apt-get install -y tor ;;
-        dnf) pm_install tor ;;
-        yum) pm_install tor ;;
-        pacman) pm_install tor ;;
-        zypper) pm_install tor ;;
+        dnf|yum|pacman|zypper) pm_install tor ;;
         *) warn "Unknown package manager. Skipping Tor update." ;;
       esac
     fi
     return 0
   fi
 
-  # Offer install
   if confirm "Tor is missing or incomplete. Install Tor now? [y/N]: "; then
     case "$(pm_detect)" in
-      apt) pm_install tor ;;
-      dnf|yum) pm_install tor ;;
-      pacman) pm_install tor ;;
-      zypper) pm_install tor ;;
-      *)
-        err "Unsupported package manager. Please install Tor manually."
-        return 1
-        ;;
+      apt|dnf|yum|pacman|zypper) pm_install tor ;;
+      *) err "Unsupported package manager. Please install Tor manually."; return 1 ;;
     esac
     ok "Tor installed."
   else
@@ -169,20 +228,13 @@ install_or_update_tor() {
 # Tor Browser checks
 # -----------------------------
 tor_browser_bin() {
-  # Typical Tor Browser launcher inside extracted dir; try to find it.
-  # Official tarball structure: tor-browser/Browser/start-tor-browser
   if [[ -x "${TOR_BROWSER_DIR}/tor-browser/Browser/start-tor-browser" ]]; then
     echo "${TOR_BROWSER_DIR}/tor-browser/Browser/start-tor-browser"
     return
   fi
-  # Alternative location if user extracted elsewhere under the dir
   local cand
   cand="$(find "${TOR_BROWSER_DIR}" -type f -name start-tor-browser -perm -111 2>/dev/null | head -n1 || true)"
-  if [[ -n "$cand" ]]; then
-    echo "$cand"
-    return
-  fi
-  echo ""
+  [[ -n "$cand" ]] && echo "$cand" || echo ""
 }
 
 tor_browser_installed() {
@@ -190,12 +242,8 @@ tor_browser_installed() {
 }
 
 download_tor_browser() {
-  # Try to choose an x86_64 English build by default.
-  # Users can change later; we keep it simple and robust.
   local url="https://www.torproject.org/dist/torbrowser/13.5.2/tor-browser-linux64-13.5.2_ALL.tar.xz"
-  # If that version becomes unavailable later, users can replace URL via BTOR_TB_URL env.
   url="${BTOR_TB_URL:-$url}"
-
   mkdir -p "${TOR_BROWSER_DIR}"
   info "Downloading Tor Browser to ${TOR_BROWSER_DIR}..."
   curl -fL --progress-bar "$url" -o "${TOR_BROWSER_DIR}/tor-browser.tar.xz"
@@ -211,10 +259,9 @@ install_or_update_tor_browser() {
   bin="$(tor_browser_bin)"
   if [[ -n "$bin" ]]; then
     ok "Tor Browser found: $bin"
-    # We don't attempt auto-updater; Tor Browser has its own internal updater.
-    if confirm "Launch Tor Browser updater (open GUI) now? [y/N]: "; then
+    if confirm "Launch Tor Browser updater (GUI) now? [y/N]: "; then
       nohup "$bin" >/dev/null 2>&1 &
-      info "Launched Tor Browser. Use its internal updater. Return to BTor when done."
+      info "Launched Tor Browser. Use its internal updater, then return to BTor."
     fi
     return 0
   fi
@@ -248,9 +295,7 @@ install_or_update_node_stack() {
     if confirm "Check for Node/npm updates via package manager? [y/N]: "; then
       case "$(pm_detect)" in
         apt) need_sudo; sudo apt-get update -y && sudo apt-get install -y nodejs npm ;;
-        dnf|yum) pm_install nodejs npm ;;
-        pacman) pm_install nodejs npm ;;
-        zypper) pm_install nodejs npm ;;
+        dnf|yum|pacman|zypper) pm_install nodejs npm ;;
         *) warn "Unsupported package manager. Skipping Node update." ;;
       esac
     fi
@@ -260,17 +305,11 @@ install_or_update_node_stack() {
   warn "Node/npm/npx not fully available."
   if confirm "Install Node.js and npm now? [y/N]: "; then
     case "$(pm_detect)" in
-      apt) pm_install nodejs npm ;;
-      dnf|yum) pm_install nodejs npm ;;
-      pacman) pm_install nodejs npm ;;
-      zypper) pm_install nodejs npm ;;
-      *)
-        err "Unsupported package manager. Please install Node.js/npm manually."
-        return 1
-        ;;
+      apt|dnf|yum|pacman|zypper) pm_install nodejs npm ;;
+      *) err "Unsupported package manager. Please install Node.js/npm manually."; return 1 ;;
     esac
     if ! npx_installed && npm_installed; then
-      ok "npx will be available via npm (same package)."
+      ok "npx will be available via npm."
     fi
   else
     warn "Skipping Node.js/npm installation."
@@ -285,26 +324,27 @@ first_run_marker() { echo "${BTOR_HOME}/.first_run_done"; }
 first_run_needed() { [[ ! -f "$(first_run_marker)" ]]; }
 
 run_first_time_setup() {
+  header
   info "First-time setup starting..."
   mkdir -p "${BTOR_HOME}"
 
-  # 1) Tor
   install_or_update_tor || true
-
-  # 2) Tor Browser
+  echo
   install_or_update_tor_browser || true
-
-  # 3) Node/npm/npx
+  echo
   install_or_update_node_stack || true
 
   touch "$(first_run_marker)"
   ok "First-time setup complete."
+  line
+  press_enter
 }
 
 # -----------------------------
 # Install / Uninstall / Update
 # -----------------------------
 install_self() {
+  header
   info "Installing BTor to ${BTOR_HOME}..."
   mkdir -p "${BTOR_HOME}"
 
@@ -321,23 +361,28 @@ install_self() {
   sudo ln -sf "${BTOR_HOME}/btor" "${BTOR_BIN_LINK}"
 
   ok "Installed. Launch with: btor"
+  line
 }
 
 uninstall_self() {
+  header
   warn "Uninstalling BTor..."
   need_sudo
   sudo rm -f "${BTOR_BIN_LINK}" || true
   rm -rf "${BTOR_HOME}" || true
   ok "BTor uninstalled."
+  line
 }
 
 self_update() {
+  header
   info "Updating from ${BTOR_RAW_URL}..."
   mkdir -p "${BTOR_HOME}"
   curl -fsSL "${BTOR_RAW_URL}" -o "${BTOR_HOME}/btor.new"
   chmod +x "${BTOR_HOME}/btor.new"
   mv "${BTOR_HOME}/btor.new" "${BTOR_HOME}/btor"
   ok "BTor updated."
+  line
 }
 
 # -----------------------------
@@ -350,7 +395,6 @@ enable_service()  { need_sudo; sudo systemctl enable  "${SERVICE_NAME}"; ok "Ena
 disable_service() { need_sudo; sudo systemctl disable "${SERVICE_NAME}"; ok "Disabled ${SERVICE_NAME} at boot."; }
 
 show_status() {
-  local mode="${1:-concise}"
   if ! have_systemctl; then
     err "systemctl not found; BTor requires systemd."
     return 1
@@ -363,22 +407,16 @@ show_status() {
   if [[ "${is_active}" == "active" ]]; then a="$(green)active$(reset)"; else a="$(red)${is_active:-unknown}$(reset)"; fi
   if [[ "${is_enabled}" == "enabled" ]]; then e="$(green)enabled$(reset)"; else e="$(yellow)${is_enabled:-unknown}$(reset)"; fi
 
-  echo "$(bold)BTor – Tor service manager$(reset)  v${BTOR_VERSION}"
   echo "Service: $(bold)${SERVICE_NAME}$(reset)"
   echo "Status: ${a}  |  Boot: ${e}"
-
-  if [[ "${mode}" == "full" ]]; then
-    echo
-    systemctl --no-pager status "${SERVICE_NAME}" || true
-  fi
 }
 
 # -----------------------------
 # Menu
 # -----------------------------
 menu_once() {
-  clear 2>/dev/null || true
-  show_status concise
+  header
+  show_status
   echo
   echo "$(bold)Options:$(reset)"
   echo "1) Start tor.service"
@@ -401,7 +439,7 @@ menu_once() {
     3) enable_service ;;
     4) disable_service ;;
     5) restart_service ;;
-    6) show_status full ;;
+    6) clear 2>/dev/null || true; header; systemctl --no-pager status "${SERVICE_NAME}" || true ;;
     7) self_update ;;
     8) uninstall_self; return 1 ;;
     9) return 1 ;;
@@ -445,10 +483,22 @@ Env:
   BTOR_REPO_RAW                  URL to fetch btor.sh for update/install
   BTOR_TOR_BROWSER_DIR           Tor Browser install/check directory (default: \$HOME/.local/tor-browser)
   BTOR_TB_URL                    Override Tor Browser tarball URL (advanced)
+
+UI:
+  BTOR_SPLASH_SPEED              Typing delay per char (default: ${BTOR_SPLASH_SPEED}s)
+  BTOR_SPLASH_PAUSE              Pause per line in splash (default: ${BTOR_SPLASH_PAUSE}s)
 EOF
 }
 
+# -----------------------------
+# Entry
+# -----------------------------
 cli() {
+  # Splash animation only for interactive sessions
+  if is_stdin_tty || have_dev_tty; then
+    splash
+  fi
+
   # If run via a pipe with no args:
   # - Prefer installing, then exec 'btor' to inherit a real TTY session if available.
   # - If /dev/tty isn't accessible, still run the menu using tty_read fallback.
@@ -458,7 +508,6 @@ cli() {
       exec btor
     else
       warn "No /dev/tty detected; running menu without installing."
-      # On first run in such env, still attempt setup best-effort:
       if first_run_needed; then run_first_time_setup || true; fi
       menu_loop
       exit 0
@@ -476,7 +525,9 @@ cli() {
     enable)    enable_service ;;
     disable)   disable_service ;;
     status)
-      if [[ "${2:-}" == "--full" ]]; then show_status full; else show_status concise; fi
+      header
+      if [[ "${2:-}" == "--full" ]]; then systemctl --no-pager status "${SERVICE_NAME}" || true; else show_status; fi
+      line
       ;;
     -h|--help|help) usage ;;
     "")
