@@ -1,5 +1,5 @@
 <p align="center">
-# 🧅 BTor – Tor Service & Browser Manager
+  <h1>🧅 BTor – Tor Service & Browser Manager</h1>
 </p>
 
 <p align="center">
