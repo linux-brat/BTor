@@ -1,22 +1,32 @@
 # 🧅 BTor – Tor Service & Browser Manager
 
+Simple CLI + Manager for Tor Service & Tor Browser on Linux
 
-<p align="center">
-<img src="BTor.png" alt="BTor Logo" width="400"/>
-</p>
+---
 
+## 📸 Screenshots
 
-<p align="center">
-<b>Simple CLI + Manager for Tor Service & Tor Browser on Linux</b>
-</p>
+Here’s a quick visual tour of BTor’s interface and flows:
 
+<div align="center">
 
-<p align="center">
-<a href="https://github.com/linux-brat/BTor/stargazers"><img src="https://img.shields.io/github/stars/linux-brat/BTor?color=purple&style=for-the-badge"></a>
-<a href="https://github.com/linux-brat/BTor/issues"><img src="https://img.shields.io/github/issues/linux-brat/BTor?style=for-the-badge"></a>
-<a href="https://github.com/linux-brat/BTor/network/members"><img src="https://img.shields.io/github/forks/linux-brat/BTor?style=for-the-badge"></a>
-<a href="https://github.com/linux-brat/BTor"><img src="https://img.shields.io/github/license/linux-brat/BTor?style=for-the-badge"></a>
-</p>
+### 🏠 Main Menu
+
+![Main Menu](screenshots/ss1.png)
+
+### ⚡ First-Time Setup
+
+![First-Time Setup](screenshots/ss5.png)
+
+### 🌐 Browser Proxy (Firefox)
+
+![Browser Proxy](screenshots/ss3.png)
+
+### 🧪 Tor Route Test
+
+![Tor Route Test](screenshots/ss2.png)
+
+</div>
 
 ---
 
@@ -58,7 +68,7 @@ btor uninstall             # Uninstall BTor
 
 When you run `btor` without arguments, you’ll get an interactive menu:
 
-```
+```bash
 1) Start tor.service
 2) Stop tor.service
 3) Enable at boot
@@ -74,14 +84,14 @@ When you run `btor` without arguments, you’ll get an interactive menu:
 
 ## ⚙️ Environment Variables
 
-| Variable               | Default                      | Description                       |
-| ---------------------- | ---------------------------- | --------------------------------- |
-| `BTOR_SERVICE_NAME`    | `tor.service`                | Override Tor systemd service name |
-| `BTOR_HOME`            | `~/.btor`                    | Installation directory            |
-| `BTOR_BIN_LINK`        | `/usr/local/bin/btor`        | Symlink path for global access    |
-| `BTOR_REPO_RAW`        | GitHub raw script URL        | Where updates are fetched from    |
-| `BTOR_TOR_BROWSER_DIR` | `~/.local/tor-browser`       | Where Tor Browser is installed    |
-| `BTOR_TB_URL`          | Official Tor Browser tarball | Override download URL             |
+| Variable               | Default                  | Description                       |
+| ---------------------- | ------------------------ | --------------------------------- |
+| `BTOR_SERVICE_NAME`    | `tor.service`            | Override Tor systemd service name |
+| `BTOR_HOME`            | `~/.btor`                | Installation directory            |
+| `BTOR_BIN_LINK`        | `/usr/local/bin/btor`    | Symlink path for global access    |
+| `BTOR_REPO_RAW`        | GitHub raw script URL    | Where updates are fetched from    |
+| `BTOR_TOR_BROWSER_DIR` | `~/.local/tor-browser`   | Where Tor Browser is installed    |
+| `BTOR_TB_URL`          | Official Tor tarball URL | Override download URL             |
 
 Example:
 
@@ -167,8 +177,8 @@ flowchart TD
 
 ## ✅ Requirements
 
-* **Linux** with `bash`
-* **systemd** (`systemctl` required)
+* Linux with `bash`
+* systemd (`systemctl` required)
 * `curl`
 * `sudo` access (for service actions and symlink)
 
