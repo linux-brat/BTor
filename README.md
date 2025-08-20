@@ -170,54 +170,6 @@ flowchart TD
 
 ---
 
-## 📖 Examples
-
-### Install BTor
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/linux-brat/BTor/main/btor.sh -o /tmp/btor.sh \
-  && chmod +x /tmp/btor.sh \
-  && /tmp/btor.sh install
-```
-
-### Start Tor service
-
-```bash
-btor start
-```
-
-### Stop Tor service
-
-```bash
-btor stop
-```
-
-### Enable Tor at boot
-
-```bash
-btor enable
-```
-
-### Check full service status
-
-```bash
-btor status --full
-```
-
-### Update BTor itself
-
-```bash
-btor update
-```
-
-### Uninstall BTor
-
-```bash
-btor uninstall
-```
-
----
-
 ## 📜 License
 
 MIT License © 2025 [linux-brat](LICENSE)
