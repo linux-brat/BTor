@@ -5,7 +5,7 @@
 ---
 
 <p align="center">
-  <img src="BTor.png" alt="Logo" width="300" height="300">
+  <img src="BTor.png" alt="Logo" width="600" height="600">
 </p>
 
 <h1 align="center">🧅 BTor – Tor Service & Browser Manager</h1>
