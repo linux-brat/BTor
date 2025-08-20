@@ -1,12 +1,10 @@
 <p align="center">
-  <strong><span style="color:red; font-size:20px;">⚠️ WARNING: This project is only tested on Arch Linux ⚠️</span></strong>
+  <strong>⚠️ WARNING: This project is only tested on Arch Linux ⚠️</strong>
 </p>
 
 ---
 
-<p align="center">
-  <h1>🧅 BTor – Tor Service & Browser Manager</h1>
-</p>
+<h1 align="center">🧅 BTor – Tor Service & Browser Manager</h1>
 
 <p align="center">
   Simple CLI + Manager for Tor Service & Tor Browser on Linux
