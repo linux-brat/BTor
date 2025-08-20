@@ -159,48 +159,6 @@ flowchart TD
     E --> F[Exit or Loop back]
 ```
 
-### Installation Flow (ASCII)
-
-```
-[Run curl install]
-        |
-        v
-[Download btor.sh]
-        |
-        v
-[Install to ~/.btor]
-        |
-        v
-[Symlink /usr/local/bin/btor]
-        |
-        v
-[First-Time Setup]
-   |     |     |
-   v     v     v
-[Check Tor] [Check TB] [Check Node.js]
-        \    |    /
-         \   |   /
-          v  v  v
-       [BTor Ready 🎉]
-```
-
-### Runtime Flow (ASCII)
-
-```
-[btor command]
-       |
-       v
-[Args given?] --No--> [Interactive Menu]
-       |                      |
-      Yes                     v
-       |              [Manage Service/Update/Uninstall]
-       v                      |
- [Run CLI Action] <------------
-       |
-       v
-     [Exit]
-```
-
 ---
 
 ## ✅ Requirements
