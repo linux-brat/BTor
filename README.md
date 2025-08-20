@@ -1,4 +1,6 @@
+<p align="center">
 # 🧅 BTor – Tor Service & Browser Manager
+</p>
 
 <p align="center">
   Simple CLI + Manager for Tor Service & Tor Browser on Linux
