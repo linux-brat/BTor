@@ -1,6 +1,23 @@
 # 🧅 BTor – Tor Service & Browser Manager
 
-Simple CLI + Manager for Tor Service & Tor Browser on Linux
+<p align="center">
+  Simple CLI + Manager for Tor Service & Tor Browser on Linux
+</p>
+
+---
+
+<p align="center">
+  <img src="https://img.shields.io/github/stars/linux-brat/btor?style=for-the-badge&logo=github&color=blue" alt="Stars"/>
+  <img src="https://img.shields.io/github/forks/linux-brat/btor?style=for-the-badge&logo=github&color=blueviolet" alt="Forks"/>
+  <img src="https://img.shields.io/github/issues/linux-brat/btor?style=for-the-badge&logo=github&color=red" alt="Issues"/>
+  <img src="https://img.shields.io/github/license/linux-brat/btor?style=for-the-badge&color=success" alt="License"/>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Made%20for-Linux-2ea44f?style=for-the-badge&logo=linux" alt="Linux"/>
+  <img src="https://img.shields.io/badge/Shell-Bash-4EAA25?style=for-the-badge&logo=gnu-bash&logoColor=white" alt="Bash"/>
+  <img src="https://img.shields.io/badge/Tor-Network-7D4698?style=for-the-badge&logo=tor-project&logoColor=white" alt="Tor"/>
+</p>
 
 ---
 
