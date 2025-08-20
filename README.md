@@ -10,13 +10,17 @@ Here’s a quick visual tour of BTor’s interface and flows:
 
 <div align="center">
 
-### 🏠 Main Menu
-
-![Main Menu](screenshots/ss1.png)
-
 ### ⚡ First-Time Setup
 
 ![First-Time Setup](screenshots/ss5.png)
+
+### ❓ Help
+
+![Help](screenshots/ss4.png)
+
+### 🏠 Main Menu
+
+![Main Menu](screenshots/ss1.png)
 
 ### 🌐 Browser Proxy (Firefox)
 
