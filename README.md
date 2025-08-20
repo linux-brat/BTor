@@ -1,4 +1,10 @@
 <p align="center">
+  <strong><span style="color:red; font-size:20px;">⚠️ WARNING: This project is only tested on Arch Linux ⚠️</span></strong>
+</p>
+
+---
+
+<p align="center">
   <h1>🧅 BTor – Tor Service & Browser Manager</h1>
 </p>
 
@@ -20,6 +26,7 @@
   <img src="https://img.shields.io/badge/Shell-Bash-4EAA25?style=for-the-badge&logo=gnu-bash&logoColor=white" alt="Bash"/>
   <img src="https://img.shields.io/badge/Tor-Network-7D4698?style=for-the-badge&logo=tor-project&logoColor=white" alt="Tor"/>
 </p>
+
 
 ---
 
